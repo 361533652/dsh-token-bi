@@ -1,0 +1,64 @@
+{
+  "name": "dsh-token-bi",
+  "version": "0.1.0",
+  "description": "Token spend BI for DeepSeek Harness: every session's usage on one board — daily columns, hourly rhythm, model and workspace splits, call tree, per-turn timeline.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "token",
+    "usage",
+    "bi",
+    "dashboard"
+  ],
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/client.js",
+    "lib/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "scripts": {
+    "test": "node test/locale-check.cjs && node test/reload.mjs && node test/slots.mjs && node test/render.mjs",
+    "test:store": "node test/harness.mjs",
+    "test:route": "node test/route.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/361533652/dsh-token-bi.git"
+  },
+  "homepage": "https://github.com/361533652/dsh-token-bi#readme",
+  "bugs": {
+    "url": "https://github.com/361533652/dsh-token-bi/issues"
+  },
+  "license": "MIT"
+}

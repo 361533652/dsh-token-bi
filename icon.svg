@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Token ledger">
+  <rect width="64" height="64" rx="14" fill="#1b2a4a"/>
+  <g stroke-linecap="round" stroke-width="5" fill="none">
+    <path d="M16 46v-9" stroke="#7aaaff"/>
+    <path d="M26 46V29" stroke="#7aaaff"/>
+    <path d="M36 46v-6" stroke="#f59e0b"/>
+    <path d="M46 46V20" stroke="#7aaaff"/>
+  </g>
+  <path d="M14 16h36" stroke="#3a4a6b" stroke-width="2" stroke-linecap="round"/>
+</svg>

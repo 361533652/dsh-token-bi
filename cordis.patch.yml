@@ -1,0 +1,7 @@
+# dsh-token-bi — cross-session token ledger.
+#
+# One Host row serves the report over /api/dsh-token-bi; the browser half
+# registers the sidebar entry and its page. No configuration is required.
+- insert:
+    - id: token-bi
+      name: dsh-token-bi

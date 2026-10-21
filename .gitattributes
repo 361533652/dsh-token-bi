@@ -1,0 +1,10 @@
+# Normalize line endings: the repository stores LF, checkouts follow the host.
+* text=auto eol=lf
+
+# Binary assets must never be converted.
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.woff2 binary
+*.ico binary

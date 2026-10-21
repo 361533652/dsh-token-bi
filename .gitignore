@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Package manager
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Test and diagnostic scratch
+.shot.*
+.shot.out.log
+.shot.err.log
+*.log
+.edge-profile/
+tmp/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
