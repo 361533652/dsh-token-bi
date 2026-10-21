@@ -21,3 +21,6 @@ tmp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Commit message scratch
+.msg.txt
