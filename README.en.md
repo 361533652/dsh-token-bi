@@ -92,18 +92,32 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
 
 ### Charts
 
-- **Daily spend** — stacked columns split into input, cache read, cache write and output. Hover for a day's breakdown.
-- **Last 7 days** — an hourly line, for seeing when tokens actually burn.
-- **By model** — split by `provider/model`, with percentages.
+- **Daily spend** — three switchable views:
+  - **Bars** (default): stacked columns split into input, cache read, cache write and output.
+  - **Trend**: a line with a filled area, for reading peaks and valleys.
+  - **Cumulative**: running total across the window, so the steepest days stand out.
+  Every view supports hover details, and **clicking a day filters everything to it**. The chart covers every day in the current window — it is not capped at 30 days.
+- **Annual activity calendar** — a GitHub-style contribution grid covering the last 365 days in five green levels. It is deliberately **independent of the time window**, and clicking a cell filters by that day too.
+- **By model** — split by `provider/model`, with percentages, ranked by spend.
 - **By workspace** — grouped by each session's `cwd`. Beyond eight, the rest is collapsed with a total shown, so a truncated list never reads as missing data.
-- **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn).
-- **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent.
+- **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent.
+- **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
+
+### Cross-filtering
+
+Four facets filter each other: day, model, workspace, and session state (live / archived).
+
+Click a day column, a model bar or a workspace bar and the other cards plus the session list recompute immediately — pick a model and the workspace list narrows to the workspaces that used it, with the session totals scoped the same way.
+
+The bar above the session table lists the active filters; each can be removed on its own, or cleared all at once.
+
+> Jumping from the call tree into the session table clears any filter that would hide the target, so the row is always found.
 
 ### Time window
 
 Three presets in the top right: **7 days / 30 days / All**.
 
-Switching refetches from the Host and recomputes totals by day; it is not a client-side filter of already-loaded data. The numbers, charts and session list all change together.
+Switching refetches from the Host and recomputes totals by day; it is not a client-side filter of already-loaded data. The numbers, charts and session list all change together. Quiet days stay on the axis — a 7-day window is 7 columns and a 30-day window is 30, so a few idle days never shrink the span.
 
 ### Export
 
@@ -176,6 +190,7 @@ GET /api/dsh-token-bi/session?id=<session id>&offset=<minutes>
   "days":     [ /* by day, with missing days zero-filled */ ],
   "hours":    [ /* hourly, last 7 days */ ],
   "cwds":     [ /* by working directory */ ],
+  "cells":    [ /* day × model × cwd cross-tab backing the facet filters */ ],
   "errors":   [ /* sessions that failed to read; they never block the report */ ]
 }
 ```
