@@ -256,6 +256,13 @@ console.log('h1:', titleNode?.children?.[0]?.[TEXT]);
 
 if (text.trim().length < 400) throw new Error('page rendered almost nothing');
 if ((tags.get('rect') ?? 0) < 4) throw new Error('daily chart produced no bars');
+// A window wider than 30 days must not be truncated on the chart, otherwise
+// older single-day spend is visible in the heatmap but missing from the bars.
+const dailyColumns = nodes.filter((node) => node.props?.className === 'tbi-col');
+console.log('daily columns:', dailyColumns.length, 'window days:', report.days.length);
+if (dailyColumns.length !== report.days.length) {
+  throw new Error(`daily chart drew ${dailyColumns.length} columns for a ${report.days.length}-day window`);
+}
 if (!text.includes(report.sessions[0].title)) throw new Error('session table did not render rows');
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
