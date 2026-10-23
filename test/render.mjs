@@ -257,6 +257,8 @@ console.log('h1:', titleNode?.children?.[0]?.[TEXT]);
 if (text.trim().length < 400) throw new Error('page rendered almost nothing');
 if ((tags.get('rect') ?? 0) < 4) throw new Error('daily chart produced no bars');
 if (!text.includes(report.sessions[0].title)) throw new Error('session table did not render rows');
-if ((tags.get('polyline') ?? 0) < 1) throw new Error('hourly chart did not render');
+if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
+  throw new Error('heatmap card did not render');
+}
 console.log('render ok');
 //#endregion
