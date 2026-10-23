@@ -28,7 +28,8 @@
     "lib/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "screenshots.json"
   ],
   "scripts": {
     "test": "node test/locale-check.cjs && node test/reload.mjs && node test/slots.mjs && node test/render.mjs",
