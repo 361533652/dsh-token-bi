@@ -32,7 +32,7 @@
     "screenshots.json"
   ],
   "scripts": {
-    "test": "node test/locale-check.cjs && node test/reload.mjs && node test/slots.mjs && node test/render.mjs",
+    "test": "node test/locale-check.cjs && node test/reload.mjs && node test/slots.mjs && node test/facets.mjs && node test/render.mjs",
     "test:store": "node test/harness.mjs",
     "test:route": "node test/route.mjs"
   },

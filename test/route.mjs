@@ -115,6 +115,21 @@ console.log('report status', report.status, 'bytes', report.body.length);
 const parsed = JSON.parse(report.body);
 console.log('sessions', parsed.totals.sessions, 'tokens', parsed.totals.total, 'days', parsed.days.length, 'errors', parsed.errors.length);
 console.log('session fields', Object.keys(parsed.sessions[0]).join(','));
+// The facet cards cross-filter each other, so the report must carry the
+// (day, model, workspace) cross-tab, not just the three independent rollups.
+if (!Array.isArray(parsed.cells) || parsed.cells.length === 0) {
+  throw new Error('report did not carry the cross-tab cells used by the facet filters');
+}
+const cellSum = parsed.cells.reduce((sum, cell) => sum + cell.total, 0);
+console.log('cells', parsed.cells.length, 'cell tokens', cellSum, 'report tokens', parsed.totals.total);
+if (cellSum !== parsed.totals.total) {
+  throw new Error(`cross-tab total ${cellSum} does not match report total ${parsed.totals.total}`);
+}
+for (const cell of parsed.cells) {
+  if (typeof cell.day !== 'string' || typeof cell.provider !== 'string' || typeof cell.model !== 'string' || typeof cell.cwd !== 'string') {
+    throw new Error('cross-tab cell is missing one of day/provider/model/cwd');
+  }
+}
 const target = parsed.sessions[0];
 const detail = await call(`${route.path}/session?id=${encodeURIComponent(target.id)}&offset=-480`);
 console.log('detail status', detail.status, 'rows', JSON.parse(detail.body).rows.length);
