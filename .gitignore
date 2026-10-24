@@ -24,3 +24,7 @@ desktop.ini
 
 # Commit message scratch
 .msg.txt
+
+# Runtime report cache. It lives in the user's session store, but ignore it in
+# case a dev session store is ever pointed inside this checkout.
+.token-bi-cache/

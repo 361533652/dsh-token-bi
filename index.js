@@ -15,6 +15,7 @@
  * installed for the process and each instance becomes its current handler.
  */
 import { UsageCollector } from './lib/collector.mjs';
+import { createSessionStore, resolveStoreRoot } from './lib/cache.mjs';
 
 /** The HTTP prefix this plugin owns. */
 const ROUTE = '/api/dsh-token-bi';
@@ -39,16 +40,41 @@ export function apply(ctx) {
   let cached;
   let building;
 
+  /**
+   * Build (or reuse) the report for one window.
+   *
+   * A cold start would otherwise re-fold every session log (~1.5 s here). The
+   * durable per-session cache removes most of that: each session is reused
+   * from disk unless its own logs changed. Per-session, not whole-store,
+   * because the session you are chatting in appends continuously and would
+   * invalidate a global snapshot every few seconds.
+   */
   const readReport = (offsetMinutes, rangeDays, force) => {
     const key = cacheKey(offsetMinutes, rangeDays);
     if (!force && cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
       return Promise.resolve(cached.report);
     }
     if (building !== undefined && building.key === key) return building.promise;
+
+    const options = { offsetMinutes, rangeDays };
+    const storeRoot = resolveStoreRoot(ctx);
+    // The per-session cache is used for forced refreshes too: it re-reads only
+    // the sessions whose own logs moved, instead of the whole store. What a
+    // forced refresh bypasses is the in-memory `cached` report above.
+    const sessionStore = storeRoot === undefined ? undefined : createSessionStore(storeRoot, options);
+    collector.sessionStore = sessionStore;
+
     const promise = collector
-      .collect({ offsetMinutes, rangeDays })
+      .collect(options)
       .then((report) => {
         cached = { at: Date.now(), key, report };
+        // Only sessions whose logs moved were re-folded, so this writes back a
+        // handful of refreshed records rather than the whole store.
+        try {
+          sessionStore?.flush();
+        } catch {
+          // Persisting is best-effort; the report itself is already built.
+        }
         return report;
       })
       .finally(() => {
