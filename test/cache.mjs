@@ -90,7 +90,7 @@ if (store.lookup(quietId, sessionDigest(quietDir), options.offsetMinutes) !== un
 }
 
 // 7. Corrupt cache degrades to empty rather than throwing.
-writeFileSync(join(root, '.token-bi-cache', 'sessions-cache.json'), '{ broken');
+writeFileSync(join(root, '.token-bi-cache', 'sessions-cache.json.zst'), 'not a zstd frame');
 const recovered = createSessionStore(root, options);
 if (recovered.size !== 0) throw new Error('corrupt cache was trusted');
 if (recovered.lookup(quietId, sessionDigest(quietDir), options.offsetMinutes) !== undefined) {
