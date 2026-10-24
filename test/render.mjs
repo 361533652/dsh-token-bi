@@ -84,6 +84,11 @@ const React = {
       effects.push(fn);
     }
   },
+  // The real renderer runs this before paint; for a DOM-less walk the
+  // distinction does not matter, but the API must exist.
+  useLayoutEffect(fn) {
+    this.useEffect(fn);
+  },
   useRef(initial) {
     const frame = current;
     const index = frame.cursor;
@@ -267,5 +272,57 @@ if (!text.includes(report.sessions[0].title)) throw new Error('session table did
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }
+
+// The model/workspace labels truncate, so hovering must reveal the untruncated
+// identity. A native `title` carrying only the model name was not enough: the
+// provider and the share stayed unreachable.
+//
+// Re-walk the *current* tree: the drill-down above replaced it, and a node kept
+// from the first walk closes over stale state slots.
+const walkCurrent = () => {
+  const out = [];
+  const collect = (list) => {
+    for (const node of list) {
+      out.push(node);
+      if (node.children) collect(node.children);
+    }
+  };
+  collect(tree);
+  return out;
+};
+
+let liveNodes = walkCurrent();
+const barRow = liveNodes.find((node) => node.props?.className === 'tbi-barRow');
+if (barRow === undefined) throw new Error('no bar row rendered');
+if (typeof barRow.props.onMouseEnter !== 'function') {
+  throw new Error('bar row has no hover handler, so truncated labels cannot be read in full');
+}
+for (const node of liveNodes) {
+  if (node.props?.className === 'tbi-barName' && node.props.title !== undefined) {
+    throw new Error('bar row fell back to a native title tooltip with incomplete text');
+  }
+}
+barRow.props.onMouseEnter();
+let tipText = '';
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  tree = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  liveNodes = walkCurrent();
+  const tip = liveNodes.find((node) => node.props?.className === 'tbi-tooltip');
+  // Text lives on dedicated leaf nodes, not on the element itself.
+  tipText = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (tipText.length > 0 && !dirty) break;
+}
+console.log('bar tooltip:', JSON.stringify(tipText));
+if (tipText.split('\n').length < 3) {
+  throw new Error(`bar tooltip only has ${tipText.split('\n').length} line(s); full identity is still hidden`);
+}
+if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
+  throw new Error('bar tooltip omits the token count');
+}
+
 console.log('render ok');
 //#endregion
