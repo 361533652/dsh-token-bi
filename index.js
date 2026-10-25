@@ -21,6 +21,13 @@ import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache,
 const ROUTE = '/api/dsh-token-bi';
 /** A report older than this is rebuilt even when nothing visible changed. */
 const REPORT_TTL_MS = 10_000;
+/**
+ * How long to wait before rebuilding behind a cached answer.
+ *
+ * Long enough that the first paint is not competing with the rebuild's disk and
+ * CPU work, short enough that a stale number corrects itself almost at once.
+ */
+const WARM_DELAY_MS = 750;
 /** Process-global route holder; survives a module reload with the page. */
 const ROUTE_SLOT = Symbol.for('dsh-token-bi/route');
 
@@ -165,7 +172,28 @@ export function apply(ctx) {
             // session cache's megabytes, so the next cold start can serve a
             // complete report without touching either.
             if (storeRoot !== undefined) {
-              saveReportCache(storeRoot, options, report, storeFingerprint(storeRoot));
+              const fingerprint = storeFingerprint(storeRoot);
+              saveReportCache(storeRoot, options, report, fingerprint);
+              // The calendar needs a full year and asks for it separately. The
+              // sessions are already folded, and the durable cache holds the
+              // complete record for each (rows included) — so the annual series
+              // is one aggregation away instead of a second full build.
+              if (rangeDays !== 0 && storeRoot !== undefined) {
+                try {
+                  const complete = storeRoot === undefined ? [] : createSessionStore(storeRoot, { offsetMinutes, rangeDays: 0 });
+                  const records = typeof complete?.snapshotRecords === 'function'
+                    ? complete.snapshotRecords(offsetMinutes).map((entry) => entry.record)
+                    : [];
+                  if (records.length > 0) {
+                    const annual = collector.buildReport(records, [], offsetMinutes, 0);
+                    if (Array.isArray(annual.days) && annual.days.length > 0) {
+                      saveReportCache(storeRoot, { offsetMinutes, rangeDays: 0 }, annual, fingerprint);
+                    }
+                  }
+                } catch {
+                  // The annual series is a bonus; never fail the main report.
+                }
+              }
             }
           } catch {
             // Persisting is best-effort; the report itself is already built.
@@ -194,14 +222,12 @@ export function apply(ctx) {
     const storeRoot = resolveStoreRoot(ctx);
     if (storeRoot !== undefined) {
       try {
-        const exact = loadReportCache(storeRoot, { offsetMinutes, rangeDays }, storeFingerprint(storeRoot));
-        const anyAge = exact ?? loadReportCache(storeRoot, { offsetMinutes, rangeDays }, undefined, true);
-        if (anyAge !== undefined) {
-          if (warming === undefined) {
-            warming = startBuild();
-            warming.catch(() => {});
-          }
-          return { ...anyAge.report, fromCache: true, cacheSavedAt: anyAge.savedAt };
+        // One read, not two: `allowStale` accepts the entry regardless of the
+        // fingerprint, and the returned `stale` flag says which it was.
+        const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays }, storeFingerprint(storeRoot), true);
+        if (hit !== undefined) {
+          scheduleWarm(key);
+          return { ...hit.report, fromCache: true, cacheSavedAt: hit.savedAt, stale: hit.stale === true };
         }
       } catch {
         // Fall through to the per-session path below.
@@ -214,16 +240,79 @@ export function apply(ctx) {
     if (await cacheIsComplete(offsetMinutes, rangeDays)) {
       const stale = reportFromCache(offsetMinutes, rangeDays);
       if (stale !== undefined) {
-        if (warming === undefined) {
-          warming = startBuild();
-          // A rejected warm is surfaced by the next request.
-          warming.catch(() => {});
-        }
+        scheduleWarm(key);
         return stale;
       }
     }
 
     return startBuild();
+  };
+
+  /**
+   * Daily totals only, for the annual heatmap.
+   *
+   * The page used to fetch a whole `days=0` report just to read `days`, which
+   * meant building every session, model and cross-tab cell a second time on each
+   * open — concurrently with the main request. The daily series is available
+   * from the same window build, so reuse it and send only the small part.
+   */
+  const readDaily = async (offsetMinutes) => {
+    // The heatmap wants a full year; the main panel wants 30 days. The annual
+    // window is the expensive one, so serve it from its own cache when present.
+    const storeRoot = resolveStoreRoot(ctx);
+    if (storeRoot !== undefined) {
+      try {
+        const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays: 0 }, storeFingerprint(storeRoot), true);
+        if (hit !== undefined) return dailyFrom(hit.report, offsetMinutes, true);
+      } catch {
+        // Fall through.
+      }
+    }
+
+    // Nothing cached yet. Answer from whatever window is already in memory so
+    // the calendar still paints, and rebuild the full year behind it. An empty
+    // reply would leave the heatmap blank on first open, which is exactly the
+    // loading state this change is meant to remove.
+    const warm = cached?.report;
+    if (warm !== undefined && Array.isArray(warm.days) && warm.days.length > 0) {
+      scheduleWarm(cacheKey(offsetMinutes, 0));
+      return dailyFrom(warm, offsetMinutes, true);
+    }
+
+    scheduleWarm(cacheKey(offsetMinutes, 0));
+    return { generatedAt: Date.now(), offsetMinutes, rangeDays: 0, days: [], fromCache: true, pending: true };
+  };;
+
+  /** The daily slice of a report, without the sessions and cross-tab. */
+  const dailyFrom = (report, offsetMinutes, fromCache) => ({
+    generatedAt: report?.generatedAt ?? Date.now(),
+    offsetMinutes,
+    rangeDays: 0,
+    cutoffDay: report?.cutoffDay,
+    days: Array.isArray(report?.days) ? report.days : [],
+    fromCache: fromCache === true || report?.fromCache === true,
+  });
+
+  /**
+   * Kick off a background rebuild *after* the response has been sent.
+   *
+   * Starting it inline made the first paint compete with the rebuild for disk
+   * and CPU: the answer itself took ~10 ms to assemble, but the request to the
+   * browser still waited behind a 5 MB cache decompress that the rebuild
+   * triggered. A short timer lets the paint happen first.
+   */
+  const scheduleWarm = (key) => {
+    if (warming !== undefined || building !== undefined) return;
+    const timer = setTimeout(() => {
+      try {
+        warming = startBuild();
+        warming.catch(() => {});
+      } catch {
+        // A failed warm leaves the stale report in place; the next open retries.
+      }
+    }, WARM_DELAY_MS);
+    // Never hold the process open just for a refresh.
+    if (typeof timer?.unref === 'function') timer.unref();
   };
 
   /** Answer one request for this instance. */
@@ -235,6 +324,10 @@ export function apply(ctx) {
     try {
       if (path === `${ROUTE}/report`) {
         sendJson(res, 200, await readReport(offsetMinutes, rangeDays, url.searchParams.get('refresh') === '1'));
+        return;
+      }
+      if (path === `${ROUTE}/days`) {
+        sendJson(res, 200, await readDaily(offsetMinutes));
         return;
       }
       if (path === `${ROUTE}/session`) {

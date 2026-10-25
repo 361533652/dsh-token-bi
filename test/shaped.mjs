@@ -6,6 +6,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 import { summarizeSession } from '../lib/collector.mjs';
+import { shapeEvents } from '../lib/shaped-events.mjs';
 import { defaultSessionRoot } from './fixture.mjs';
 
 const MAGIC = 4247762216;
@@ -50,58 +51,6 @@ function walk(dir, out = []) {
   return out;
 }
 
-/** Strip an event to just what the fold reads, keeping replace semantics intact. */
-function shape(event) {
-  const type = event.type;
-  const time = event.time;
-  const seq = event.seq;
-  const d = event.data;
-
-  if (type === 'assistant/message' || type === 'assistant/attempt') {
-    const usage = d?.usage ?? streamUsage(d?.stream);
-    if (usage === undefined) return undefined;
-    const source = d?.message?.source;
-    return {
-      type, time, seq,
-      data: {
-        turn: d?.turn, step: d?.step,
-        usage: {
-          inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
-          cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens,
-        },
-        message: source ? { source: { provider: source.provider, model: source.model } } : undefined,
-      },
-    };
-  }
-  if (type === 'web/deepseek-search-llm-request') {
-    return {
-      type, time, seq,
-      data: { turn: d?.turn, step: d?.step, body: { model: d?.body?.model, messages: d?.body?.messages } },
-    };
-  }
-  if (type === 'session/title-llm-request') {
-    return { type, time, seq, data: { turn: d?.turn, step: d?.step, route: d?.route, messages: d?.messages } };
-  }
-  if (type === 'tool/call') {
-    if (d?.name !== 'web_search') return { type, time, seq, data: { callId: d?.callId, name: d?.name } };
-    return { type, time, seq, data: { callId: d?.callId, name: d?.name, arguments: d?.arguments, turn: d?.turn, step: d?.step } };
-  }
-  if (type === 'tool/result') {
-    return { type, time, seq, data: { message: { toolCallId: d?.message?.toolCallId } } };
-  }
-  if (type === 'turn/start') return { type, time, seq, data: { turn: d?.turn } };
-  if (type === 'step/end') return { type, time, seq, data: {} };
-  return { type, time, seq };
-}
-
-function streamUsage(stream) {
-  if (!Array.isArray(stream)) return undefined;
-  for (let i = stream.length - 1; i >= 0; i -= 1) {
-    if (stream[i]?.chunk?.type === 'usage' && stream[i].chunk.usage !== undefined) return stream[i].chunk.usage;
-  }
-  return undefined;
-}
-
 const byId = new Map();
 for (const file of walk(defaultSessionRoot())) {
   let events;
@@ -121,6 +70,9 @@ let fullBytes = 0;
 let shapedBytes = 0;
 let mismatches = 0;
 let compared = 0;
+let titleComparisons = 0;
+let titleMismatches = 0;
+const titleExamples = [];
 const examples = [];
 
 for (const [id, { events }] of byId) {
@@ -131,7 +83,7 @@ for (const [id, { events }] of byId) {
     parentSession: null, delegationDepth: 0, agentPreset: null,
   };
   const full = summarizeSession(header, events, OFFSET, false);
-  const shaped = events.map(shape).filter(Boolean);
+  const shaped = shapeEvents(events);
   const rebuilt = summarizeSession(header, shaped, OFFSET, false);
 
   fullBytes += JSON.stringify(events).length;
@@ -144,13 +96,23 @@ for (const [id, { events }] of byId) {
     full.totals.cacheRead === rebuilt.totals.cacheRead &&
     full.totals.cacheWrite === rebuilt.totals.cacheWrite;
 
-  if (!same) {
+  // The fold also derives the session title; a shaping step that drops it made
+  // the table fall back to "Session <id>" while the totals still matched.
+  const sameTitle = (full.title ?? '') === (rebuilt.title ?? '');
+
+  if (sameTitle) titleComparisons += 1;
+  if (!sameTitle) titleMismatches += 1;
+
+  if (!same || !sameTitle) {
     mismatches += 1;
+    if (!sameTitle && titleExamples.length < 6) {
+      titleExamples.push({ id: String(id).slice(0, 24), full: full.title, shaped: rebuilt.title });
+    }
     if (examples.length < 4) {
       examples.push({
         id: String(id).slice(0, 22),
-        full: `${full.totals.input}/${full.totals.output}/${full.totals.cacheRead}`,
-        shaped: `${rebuilt.totals.input}/${rebuilt.totals.output}/${rebuilt.totals.cacheRead}`,
+        full: JSON.stringify(full.totals),
+        shaped: JSON.stringify(rebuilt.totals),
       });
     }
   }
@@ -161,9 +123,15 @@ console.log('mismatches         :', mismatches);
 console.log('full events MB     :', (fullBytes / 1048576).toFixed(1));
 console.log('shaped events MB   :', (shapedBytes / 1048576).toFixed(1));
 console.log('reduction          :', ((1 - shapedBytes / fullBytes) * 100).toFixed(0) + '%');
+console.log('titles compared:', titleComparisons, 'mismatched:', titleMismatches);
+if (titleExamples.length > 0) console.log('title examples:', JSON.stringify(titleExamples, null, 1));
 if (examples.length) console.log('examples:', JSON.stringify(examples, null, 1));
 if (mismatches > 0) {
   console.log('SHAPING PARITY FAILED');
+  process.exit(1);
+}
+if (titleMismatches > 0) {
+  console.log('SHAPING DROPPED SESSION TITLES');
   process.exit(1);
 }
 console.log('shaping parity ok (exact fold reproduction)');
