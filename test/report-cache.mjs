@@ -3,9 +3,10 @@
  * strictly keyed: wrong window, wrong zone, or a store that moved on all mean
  * "rebuild", never "serve something else".
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { loadReportCache, saveReportCache, storeFingerprint } from '../lib/cache.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'token-bi-report-'));
@@ -60,7 +61,20 @@ if (backAll.report.totals.total !== 111 || back30.report.totals.total !== 999) {
   throw new Error('windows returned each other\u2019s report');
 }
 
-// 4. Corruption is ignored rather than thrown.
+// 3c. A report written on an earlier local day must not be served, even when the
+//     store fingerprint still matches. Overnight the window slides but no log is
+//     necessarily written, so the "today" column would otherwise stay on
+//     yesterday's date until some session happened to be touched.
+const previousDay = JSON.parse(zstdDecompressSync(readFileSync(join(root, '.token-bi-cache', `report-cache-${options.rangeDays}.json.zst`))).toString('utf8'));
+previousDay.builtOnLocalDay = '1999-01-01';
+writeFileSync(join(root, '.token-bi-cache', `report-cache-${options.rangeDays}.json.zst`), zstdCompressSync(Buffer.from(JSON.stringify(previousDay), 'utf8')));
+const staleDay = loadReportCache(root, options, moved);
+console.log('yesterday\u2019s report rejected:', staleDay === undefined);
+if (staleDay !== undefined) {
+  throw new Error('a report built on a previous local day was served as current');
+}
+
+// 3d. Corruption is ignored rather than thrown.
 writeFileSync(join(root, '.token-bi-cache', `report-cache-${options.rangeDays}.json.zst`), 'not zstd');
 if (loadReportCache(root, options, moved) !== undefined) throw new Error('corrupt report cache was trusted');
 

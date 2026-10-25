@@ -226,7 +226,7 @@ export function apply(ctx) {
         // fingerprint, and the returned `stale` flag says which it was.
         const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays }, storeFingerprint(storeRoot), true);
         if (hit !== undefined) {
-          scheduleWarm(key);
+          scheduleWarm(startBuild);
           return { ...hit.report, fromCache: true, cacheSavedAt: hit.savedAt, stale: hit.stale === true };
         }
       } catch {
@@ -240,7 +240,7 @@ export function apply(ctx) {
     if (await cacheIsComplete(offsetMinutes, rangeDays)) {
       const stale = reportFromCache(offsetMinutes, rangeDays);
       if (stale !== undefined) {
-        scheduleWarm(key);
+        scheduleWarm(startBuild);
         return stale;
       }
     }
@@ -275,11 +275,11 @@ export function apply(ctx) {
     // loading state this change is meant to remove.
     const warm = cached?.report;
     if (warm !== undefined && Array.isArray(warm.days) && warm.days.length > 0) {
-      scheduleWarm(cacheKey(offsetMinutes, 0));
+      scheduleWarm(() => readReport(offsetMinutes, 0, false));
       return dailyFrom(warm, offsetMinutes, true);
     }
 
-    scheduleWarm(cacheKey(offsetMinutes, 0));
+    scheduleWarm(() => readReport(offsetMinutes, 0, false));
     return { generatedAt: Date.now(), offsetMinutes, rangeDays: 0, days: [], fromCache: true, pending: true };
   };;
 
@@ -301,11 +301,11 @@ export function apply(ctx) {
    * browser still waited behind a 5 MB cache decompress that the rebuild
    * triggered. A short timer lets the paint happen first.
    */
-  const scheduleWarm = (key) => {
+  const scheduleWarm = (build) => {
     if (warming !== undefined || building !== undefined) return;
     const timer = setTimeout(() => {
       try {
-        warming = startBuild();
+        warming = build();
         warming.catch(() => {});
       } catch {
         // A failed warm leaves the stale report in place; the next open retries.
