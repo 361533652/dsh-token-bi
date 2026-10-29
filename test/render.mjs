@@ -109,11 +109,17 @@ const window = {
   },
   setInterval: () => 0,
   clearInterval: () => {},
+  // The panel subscribes to focus so a background window catches up as soon as
+  // it is brought forward; the stub only has to accept and forget the listener.
+  addEventListener: () => {},
+  removeEventListener: () => {},
 };
 const document = {
   visibilityState: 'visible',
   createElement: () => ({ dataset: {}, remove() {}, textContent: '' }),
   head: { appendChild() {} },
+  addEventListener: () => {},
+  removeEventListener: () => {},
 };
 
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
