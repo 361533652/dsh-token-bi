@@ -109,6 +109,13 @@ let registration;
 const timers = [];
 const requests = [];
 const listeners = [];
+/** Stand-in for the browser's localStorage, so the paint cache is exercised. */
+const storage = new Map();
+const localStorage = {
+  getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+  setItem: (key, value) => storage.set(key, String(value)),
+  removeItem: (key) => storage.delete(key),
+};
 const window = {
   __ModuleLoader__: {
     load(candidate) {
@@ -138,7 +145,7 @@ const document = {
 };
 
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
-new Function('window', 'document', source)(window, document);
+new Function('window', 'document', 'localStorage', source)(window, document, localStorage);
 if (registration === undefined) throw new Error('client.js did not register a module');
 const moduleExports = registration.factory((id) => {
   if (id === 'react') return React;
@@ -369,6 +376,116 @@ if (timers.length > 0) {
   throw new Error(`page still refreshes on its own timer: ${timers.join(', ')}ms`);
 }
 console.log('timers:', timers.length);
+
+// Reopening the panel has to paint from the last report, not from a cold slate.
+// The host unmounts the page on the way out and mounts it on the way back, so
+// this is the *common* path: every switch away and back used to earn a fresh
+// "reading session logs…" spinner for numbers one second old.
+//
+// Reset every piece of in-memory state a remount would drop, then walk the tree
+// exactly once *without running effects* — that single frame is what the user
+// sees before any request has had a chance to answer.
+//
+// `frames` has to go too: it is the stand-in for React's component state, and
+// leaving it in place would let this check pass on the *previous* mount's
+// state, which is exactly the situation an unmount destroys.
+let savedKeys = [...storage.keys()];
+if (!savedKeys.some((key) => key.includes('report'))) {
+  throw new Error('nothing was kept for the next open; reopening would start cold again');
+}
+console.log('stored snapshots:', savedKeys.join(', '));
+
+const walkOnce = (list) => {
+  const out = [];
+  const collect = (nodes) => {
+    for (const node of nodes) {
+      out.push(node);
+      if (node.children) collect(node.children);
+    }
+  };
+  collect(list);
+  return out;
+};
+
+frames = [];
+frameIndex = 0;
+dirty = false;
+effects = [];
+const firstFrame = renderNode(React.createElement(page.component, { t }));
+const firstNodes = walkOnce(firstFrame);
+const firstText = firstNodes.filter((node) => node[TEXT] !== undefined).map((node) => node[TEXT]).join(' ');
+console.log('reopen first-frame chars:', firstText.trim().length);
+if (firstText.includes(zh.loading)) {
+  throw new Error('reopening the panel still shows the cold "reading logs" state');
+}
+if (!firstText.includes(zh.todayTokens)) {
+  throw new Error(`reopening the panel painted no numbers: ${JSON.stringify(firstText.slice(0, 80))}`);
+}
+const firstFoot = firstNodes.find((node) => node.props?.className === 'tbi-foot');
+if (firstFoot === undefined) throw new Error('reopened panel rendered no footer');
+// The footer must not claim the painted numbers are current while the rebuild
+// is still in flight.
+if (!firstText.includes(zh.snapshotAt)) {
+  throw new Error('reopened panel presented a restored snapshot as a fresh aggregation');
+}
+const footText = (firstFoot.children ?? []).flatMap((child) => (child?.children ?? []).map((leaf) => leaf?.[TEXT] ?? '')).join(' | ');
+console.log('reopen footer:', footText);
+
+// The frame *after* the mount effect is the one the user stares at while the
+// request is out. The stub applies `setState` immediately, unlike React, so the
+// rendered frames above cannot catch a status regression here — assert the
+// transition rule itself instead.
+//
+// `load` starts a rebuild. Whatever is on screen must survive it: a page
+// painted from a snapshot is in `refreshing` already, and a rule written for
+// `ready` alone demotes it back to `loading`, which swaps the whole panel for a
+// spinner right after the numbers appear. That is the flash-and-vanish bug this
+// check exists for.
+const transitions = [...readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8').matchAll(/setStatus\(\(current\) => \(([^)]*)\)\)/g)].map((m) => m[1]);
+console.log('status transitions:', transitions.join(' | '));
+if (transitions.length === 0) throw new Error('no status transition found; did the refresh state machine move?');
+for (const transition of transitions) {
+  if (transition.includes("=== 'ready'")) {
+    throw new Error(`status transition "${transition}" only preserves a full panel; a snapshot-painted one is dropped back to the cold state`);
+  }
+}
+if (!transitions.some((transition) => transition.includes("=== 'loading'"))) {
+  throw new Error('status transition never treats the cold state specially, so the loading placeholder cannot render');
+}
+
+// ...and once the rebuild lands, the footer goes back to claiming the numbers
+// are current. Otherwise every open would look permanently half-loaded.
+savedKeys = null;
+frames = [];
+frameIndex = 0;
+dirty = false;
+effects = [];
+let settledTree = renderNode(React.createElement(page.component, { t }));
+for (const effect of effects) effect();
+await new Promise((resolve) => setTimeout(resolve, 60));
+frames = []; // drop again: the remount must start from the snapshot, not the response
+frameIndex = 0;
+dirty = false;
+effects = [];
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  settledTree = renderNode(React.createElement(page.component, { t }));
+  // Only the follow-up effects, not a fresh mount: replay what the mount
+  // registered, exactly as a real open would.
+  for (const effect of effects) effect();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (!dirty) break;
+}
+const settledNodes = walkOnce(settledTree);
+const settledText = settledNodes.filter((node) => node[TEXT] !== undefined).map((node) => node[TEXT]).join(' ');
+const settledFoot = settledNodes.find((node) => node.props?.className === 'tbi-foot');
+const settledFootText = (settledFoot?.children ?? []).flatMap((child) => (child?.children ?? []).map((leaf) => leaf?.[TEXT] ?? '')).join(' | ');
+console.log('settled footer:', settledFootText);
+if (settledText.includes(zh.snapshotAt) && settledText.includes(zh.refreshing)) {
+  throw new Error(`footer never returns to a settled state: ${settledFootText}`);
+}
 
 console.log('render ok');
 //#endregion
