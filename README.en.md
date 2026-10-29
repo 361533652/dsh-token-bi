@@ -158,6 +158,17 @@ Each event is bucketed into a **local** calendar day by its timestamp. The brows
 - The whole report is cached for 10 seconds; `refresh=1` forces a rebuild.
 - The cache key includes the time window, so switching presets never serves another window's numbers.
 
+### When it refreshes
+
+There is no timer in the page; every rebuild is caused by something the user did:
+
+- **Opening the bill.** The host mounts the page when the panel is opened and unmounts it when you switch away, so a mount *is* "just opened" — it asks for `refresh=1`, because the first number you see should be the number at the moment you looked, not a 10-second-old cache entry.
+- **Switching 7 days / 30 days / all.** Also a forced rebuild, so the preset you just clicked never shows a snapshot taken before the click.
+- **Coming back to the window** (`visibilitychange` / `focus`): one rebuild on the way back in; nothing is sent while the window is in the background.
+- The **Refresh** button at the top, for anything else.
+
+Left open and untouched, the numbers simply sit still — an open panel costs nothing in the background.
+
 ---
 
 ## HTTP API

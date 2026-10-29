@@ -101,24 +101,39 @@ const React = {
 
 //#region module capture
 let registration;
+/**
+ * Every timer the page asks for, and every request it makes. The page must
+ * refresh on the actions that open it and never on a tick of its own: a panel
+ * left open, or sitting in the background, has to stay quiet.
+ */
+const timers = [];
+const requests = [];
+const listeners = [];
 const window = {
   __ModuleLoader__: {
     load(candidate) {
       registration = candidate;
     },
   },
-  setInterval: () => 0,
+  setInterval: (fn, ms) => {
+    timers.push(ms);
+    return timers.length;
+  },
   clearInterval: () => {},
   // The panel subscribes to focus so a background window catches up as soon as
-  // it is brought forward; the stub only has to accept and forget the listener.
-  addEventListener: () => {},
+  // it is brought forward; the stub only has to accept and remember it.
+  addEventListener: (type) => {
+    listeners.push(`window:${type}`);
+  },
   removeEventListener: () => {},
 };
 const document = {
   visibilityState: 'visible',
   createElement: () => ({ dataset: {}, remove() {}, textContent: '' }),
   head: { appendChild() {} },
-  addEventListener: () => {},
+  addEventListener: (type) => {
+    listeners.push(type);
+  },
   removeEventListener: () => {},
 };
 
@@ -144,6 +159,7 @@ const detail = {
 
 globalThis.fetch = async (url) => {
   const target = String(url);
+  requests.push(target);
   const body = target.includes('/session?') ? detail : report;
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 };
@@ -211,6 +227,23 @@ for (let pass = 0; pass < 10; pass += 1) {
   await new Promise((resolve) => setTimeout(resolve, 30));
   if (!dirty) break;
 }
+
+// Opening the bill is what refreshes it. The host mounts the page when the
+// panel is opened, so the first report request has to skip the server cache —
+// otherwise the panel opens on a snapshot taken before the click, and there is
+// no timer behind it to correct the number a few seconds later.
+const firstReport = requests.find((url) => url.includes('/report?'));
+console.log('first report request:', firstReport);
+if (firstReport === undefined) throw new Error('opening the page issued no report request');
+if (!firstReport.includes('refresh=1')) {
+  throw new Error(`opening the page settled for the cached report: ${firstReport}`);
+}
+
+// Refreshing on the way back into the window is what stands in for polling.
+for (const expected of ['visibilitychange', 'window:focus']) {
+  if (!listeners.includes(expected)) throw new Error(`page never listens for ${expected}, so a returning window shows a stale total`);
+}
+console.log('listeners:', listeners.join(', '));
 
 const nodes = [];
 const walk = (list) => {
@@ -329,6 +362,13 @@ if (tipText.split('\n').length < 3) {
 if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
   throw new Error('bar tooltip omits the token count');
 }
+
+// Nothing on this page may carry a timer: a panel left open, or sitting in the
+// background, has to cost nothing.
+if (timers.length > 0) {
+  throw new Error(`page still refreshes on its own timer: ${timers.join(', ')}ms`);
+}
+console.log('timers:', timers.length);
 
 console.log('render ok');
 //#endregion
