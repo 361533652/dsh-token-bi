@@ -158,6 +158,27 @@ Each event is bucketed into a **local** calendar day by its timestamp. The brows
 - The whole report is cached for 10 seconds; `refresh=1` forces a rebuild.
 - The cache key includes the time window, so switching presets never serves another window's numbers.
 
+### When it refreshes
+
+There is no timer in the page; every rebuild is caused by something the user did:
+
+- **Opening the bill.** The host mounts the page when the panel is opened and unmounts it when you switch away, so a mount *is* "just opened" — it asks for `refresh=1`, because the first number you see should be the number at the moment you looked, not a 10-second-old cache entry.
+- **Switching 7 days / 30 days / all.** Also a forced rebuild, so the preset you just clicked never shows a snapshot taken before the click.
+- **Coming back to the window** (`visibilitychange` / `focus`): one rebuild on the way back in; nothing is sent while the window is in the background.
+- The **Refresh** button at the top, for anything else.
+
+Left open and untouched, the numbers simply sit still — an open panel costs nothing in the background.
+
+### Opening shows the last numbers, then refreshes behind them
+
+A rebuild needs a round trip, but nobody should have to look at an empty page for it. Every successful aggregation is kept in the browser's `localStorage`, one entry per window (`dsh-token-bi:report:v1:<days>`). Reopening the panel paints that snapshot immediately and rebuilds behind it:
+
+- The footer reads **"Last aggregated HH:MM · Aggregating…"** while the snapshot is on screen, rather than claiming numbers that are a rebuild old are current. It returns to "Aggregated" when the response lands.
+- Snapshots older than six hours are ignored — a number from last night is more misleading than a blank page.
+- It is a paint cache, not a source of truth: whatever the server returns replaces it wholesale, and a corrupt entry or a full quota just falls back to the cold state.
+
+Measured (headless Edge over CDP, holding the report request open): 1.2 s after reopening the panel the full page was on screen with the refresh request not having returned a single byte.
+
 ---
 
 ## HTTP API
