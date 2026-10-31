@@ -113,6 +113,18 @@ The bar above the session table lists the active filters; each can be removed on
 
 > Jumping from the call tree into the session table clears any filter that would hide the target, so the row is always found.
 
+### Folding subagents
+
+A subagent is a session of its own, but it hangs under the session that spawned it: indented 22px with a "Subagent" marker in the session table, and drawn as a `└─` branch in the call tree.
+
+They start **folded** — a session that spawned twenty children used to be twenty rows of noise in front of every other session. A row with children carries a switch saying how many it hides (`▸ 5 Subagent`); click it to unfold that branch in place. Both card headers carry "Fold all subagents / Unfold all subagents", and the two lists share one fold state, so they never disagree.
+
+Three things hold:
+
+1. **Folding changes what is drawn, not what is counted.** The headline numbers, the charts and the CSV export all read the full set; a folded child is still inside its parent's own/children bar in the call tree (own and childTotal were always complete), so nothing looks smaller than it is.
+2. **The switch and the timeline are separate targets.** Clicking the row opens its per-turn timeline; clicking the switch only folds the branch.
+3. **No session that should be visible gets hidden.** If a filter drops a child's parent (the parent had no activity that day, say), the child is drawn as a root rather than disappearing with it. Measured: folded, the rendered rows are *exactly* the sessions whose parent is not in the list.
+
 ### Time window
 
 Three presets in the top right: **7 days / 30 days / All**.
