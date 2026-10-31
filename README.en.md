@@ -98,7 +98,7 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
   - **Cumulative**: running total across the window, so the steepest days stand out.
   Every view supports hover details, and **clicking a day filters everything to it**. The chart covers every day in the current window — it is not capped at 30 days.
 - **Annual activity calendar** — a GitHub-style contribution grid covering the last 365 days in five green levels. It is deliberately **independent of the time window**, and clicking a cell filters by that day too.
-- **By model** — split by `provider/model`, with percentages, ranked by spend.
+- **By model** — split by `provider/model`, with percentages, ranked by spend. `aggregate` is Jet Hub's virtual aggregate route; the row names the real channel it is currently on (e.g. `qodercn · aggregate · 38.6%`), and its tooltip explains that it switches channels by credit expiry — history is not split by channel.
 - **By workspace** — grouped by each session's `cwd`. Beyond eight, the rest is collapsed with a total shown, so a truncated list never reads as missing data.
 - **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent.
 - **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.

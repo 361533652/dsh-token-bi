@@ -167,6 +167,18 @@ const moduleExports = registration.factory((id) => {
 const { buildFixture } = await import('./fixture.mjs');
 const report = await buildFixture();
 
+// An aggregate-routed model, so the "which real channel is it on now" note can
+// be asserted without depending on the local store having used the route.
+report.models = [...(report.models ?? []), {
+  provider: 'aggregate',
+  model: 'deepseek-v4-1-flash',
+  total: 500,
+  input: 400,
+  output: 100,
+  cacheRead: 0,
+  cacheWrite: 0,
+}];
+
 // A parent with a delegated child, so folding can be checked whatever the
 // local session store happens to contain. Both are stamped long ago, which
 // keeps them at the bottom of the table — the drill-down above clicks the first
@@ -212,6 +224,13 @@ const detail = {
 globalThis.fetch = async (url) => {
   const target = String(url);
   requests.push(target);
+  // Jet Hub probe: the aggregate route reports the real channel it is on.
+  if (target.includes('/api/jet-hub')) {
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      json: async () => ({ result: { ok: true, value: { provider: 'qodercn' } } }),
+    };
+  }
   const body = target.includes('/session?') ? detail : report;
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 };
@@ -487,6 +506,38 @@ const track = collectAll(parentTreeRow.children ?? []).find((node) => node.props
 if (track === undefined) throw new Error('the folded parent lost its bar');
 if (String(track.props.title).length === 0) throw new Error('the bar no longer explains own vs children');
 console.log('tree fold ok');
+//#endregion
+
+//#region aggregate route note
+// The aggregate provider is a virtual route; the card names the real channel
+// the host reports as currently active, without pretending the merged history
+// can be split. The test's Jet Hub stub answers "qodercn".
+const aggRow = foldNodes.find((node) => node.props?.className === 'tbi-barRow' && collectAll(node.children ?? []).some((leaf) => String(leaf?.[TEXT]).includes('aggregate')));
+if (aggRow === undefined) throw new Error('the synthetic aggregate model did not render a bar row');
+const aggText = collectAll(aggRow.children ?? []).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
+console.log('aggregate row:', JSON.stringify(aggText));
+if (!aggText.includes('qodercn')) {
+  throw new Error(`the aggregate row does not name its real channel: ${aggText}`);
+}
+// The hint only materialises on hover, through the Tooltip's show callback.
+if (typeof aggRow.props.onMouseEnter !== 'function') {
+  throw new Error('the aggregate row has no hover handler');
+}
+aggRow.props.onMouseEnter();
+let aggTip = '';
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  tree = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  const tipNodes = collectAll(tree).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
+  aggTip = tipNodes;
+  if (aggTip.includes(zh.aggregateHint) && !dirty) break;
+}
+if (!aggTip.includes(zh.aggregateHint)) {
+  throw new Error('the aggregate row lost its explanation tooltip');
+}
 //#endregion
 
 const titleNode = nodes.find((node) => node.tag === 'h1');
