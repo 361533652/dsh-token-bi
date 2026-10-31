@@ -98,7 +98,7 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
   - **Cumulative**: running total across the window, so the steepest days stand out.
   Every view supports hover details, and **clicking a day filters everything to it**. The chart covers every day in the current window — it is not capped at 30 days.
 - **Annual activity calendar** — a GitHub-style contribution grid covering the last 365 days in five green levels. It is deliberately **independent of the time window**, and clicking a cell filters by that day too.
-- **By model** — split by `provider/model`, with percentages, ranked by spend.
+- **By model** — split by `provider/model`, with percentages, ranked by spend. `aggregate` is Jet Hub's virtual aggregate route; the row names the real channel it is currently on (e.g. `qodercn · aggregate · 38.6%`), and its tooltip explains that it switches channels by credit expiry — history is not split by channel.
 - **By workspace** — grouped by each session's `cwd`. Beyond eight, the rest is collapsed with a total shown, so a truncated list never reads as missing data.
 - **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent.
 - **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
@@ -112,6 +112,18 @@ Click a day column, a model bar or a workspace bar and the other cards plus the 
 The bar above the session table lists the active filters; each can be removed on its own, or cleared all at once.
 
 > Jumping from the call tree into the session table clears any filter that would hide the target, so the row is always found.
+
+### Folding subagents
+
+A subagent is a session of its own, but it hangs under the session that spawned it: indented 22px with a "Subagent" marker in the session table, and drawn as a `└─` branch in the call tree.
+
+They start **folded** — a session that spawned twenty children used to be twenty rows of noise in front of every other session. A row with children carries a switch saying how many it hides (`▸ 5 Subagent`); click it to unfold that branch in place. Both card headers carry "Fold all subagents / Unfold all subagents", and the two lists share one fold state, so they never disagree.
+
+Three things hold:
+
+1. **Folding changes what is drawn, not what is counted.** The headline numbers, the charts and the CSV export all read the full set; a folded child is still inside its parent's own/children bar in the call tree (own and childTotal were always complete), so nothing looks smaller than it is.
+2. **The switch and the timeline are separate targets.** Clicking the row opens its per-turn timeline; clicking the switch only folds the branch.
+3. **No session that should be visible gets hidden.** If a filter drops a child's parent (the parent had no activity that day, say), the child is drawn as a root rather than disappearing with it. Measured: folded, the rendered rows are *exactly* the sessions whose parent is not in the list.
 
 ### Time window
 

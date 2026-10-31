@@ -134,10 +134,20 @@ const window = {
   },
   removeEventListener: () => {},
 };
+/**
+ * Session rows the page went looking for by id. `locateSession` is the only
+ * thing that does this, so an id showing up here proves something treated a
+ * click as "navigate to this session" rather than as "fold this branch".
+ */
+const domLookups = [];
 const document = {
   visibilityState: 'visible',
   createElement: () => ({ dataset: {}, remove() {}, textContent: '' }),
   head: { appendChild() {} },
+  getElementById: (id) => {
+    domLookups.push(String(id));
+    return null;
+  },
   addEventListener: (type) => {
     listeners.push(type);
   },
@@ -156,6 +166,53 @@ const moduleExports = registration.factory((id) => {
 //#region report fixture
 const { buildFixture } = await import('./fixture.mjs');
 const report = await buildFixture();
+
+// An aggregate-routed model, so the "which real channel is it on now" note can
+// be asserted without depending on the local store having used the route.
+report.models = [...(report.models ?? []), {
+  provider: 'aggregate',
+  model: 'deepseek-v4-1-flash',
+  total: 500,
+  input: 400,
+  output: 100,
+  cacheRead: 0,
+  cacheWrite: 0,
+}];
+
+// A parent with a delegated child, so folding can be checked whatever the
+// local session store happens to contain. Both are stamped long ago, which
+// keeps them at the bottom of the table — the drill-down above clicks the first
+// row, and that has to stay the real, most recent session.
+const syntheticTotals = (total) => ({ input: total, output: 0, cacheRead: 0, cacheWrite: 0, total });
+report.sessions.push(
+  {
+    id: 'fold-parent',
+    title: 'Fold parent session',
+    cwd: '/probe/fold',
+    models: [{ provider: 'probe', model: 'fold' }],
+    turns: 2,
+    totals: syntheticTotals(1000),
+    parentSession: null,
+    live: false,
+    firstTime: 1,
+    lastTime: 1,
+    days: [],
+  },
+  {
+    id: 'fold-child',
+    title: 'Fold child session',
+    cwd: '/probe/fold',
+    models: [{ provider: 'probe', model: 'fold' }],
+    turns: 1,
+    totals: syntheticTotals(400),
+    parentSession: 'fold-parent',
+    live: false,
+    firstTime: 1,
+    lastTime: 1,
+    days: [],
+  },
+);
+
 const detail = {
   ...report.sessions[0],
   rows: [
@@ -167,6 +224,13 @@ const detail = {
 globalThis.fetch = async (url) => {
   const target = String(url);
   requests.push(target);
+  // Jet Hub probe: the aggregate route reports the real channel it is on.
+  if (target.includes('/api/jet-hub')) {
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      json: async () => ({ result: { ok: true, value: { provider: 'qodercn' } } }),
+    };
+  }
   const body = target.includes('/session?') ? detail : report;
   return { ok: true, status: 200, statusText: 'OK', json: async () => body };
 };
@@ -301,6 +365,180 @@ if (rows.length > 0) {
   console.log('turn rows after drill-down:', turnRows.length);
   if (turnRows.length === 0) throw new Error('drill-down produced no turn rows');
 }
+
+//#region folding delegated sessions
+// A session that spawned subagents used to add a row per child to both lists,
+// with no way to put them away. They are now folded under their parent and
+// unfolded on demand — without dropping anything the page already promised:
+// the headline totals, the row's own numbers and the call tree's own/children
+// split all have to survive a fold.
+const collectAll = (list) => {
+  const out = [];
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      out.push(node);
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(list);
+  return out;
+};
+const rerender = async (wait = 40) => {
+  for (let pass = 0; pass < 4; pass += 1) {
+    dirty = false;
+    effects = [];
+    frameIndex = 0;
+    tree = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    if (!dirty) break;
+  }
+  return collectAll(tree);
+};
+const rowById = (nodes, id) => nodes.find((node) => node.props?.id === `session-${id}`);
+const detailRowCount = (nodes) => nodes.filter((node) => node.props?.className === 'tbi-detailRow').length;
+
+/**
+ * Click a nested control the way a browser would.
+ *
+ * The fold control lives inside a row that is itself clickable, so a real click
+ * runs the control's handler and then bubbles to the row's unless the control
+ * stops it. Calling `onClick()` directly would skip that entirely and let a
+ * missing `stopPropagation` pass unnoticed — which is exactly the bug that makes
+ * folding a branch also fling the turn timeline open.
+ */
+const clickBubblingTo = (target, ancestor) => {
+  const event = {
+    stopped: false,
+    stopPropagation() {
+      this.stopped = true;
+    },
+    preventDefault() {},
+  };
+  target.props.onClick(event);
+  if (!event.stopped && typeof ancestor?.props?.onClick === 'function') ancestor.props.onClick(event);
+  return event;
+};
+
+
+let foldNodes = await rerender();
+const headlineBefore = foldNodes.filter((node) => node.props?.className === 'tbi-figure').map((node) => JSON.stringify(node.children?.[0]?.[TEXT] ?? '')).join(',');
+
+// Folded by default: the child row is simply not drawn.
+console.log('child row folded by default:', rowById(foldNodes, 'fold-child') === undefined);
+if (rowById(foldNodes, 'fold-child') !== undefined) {
+  throw new Error('a subagent row is drawn by default; folding is not on');
+}
+const parentRow = rowById(foldNodes, 'fold-parent');
+if (parentRow === undefined) throw new Error('the parent session row is missing');
+
+// The fold control has to exist on the parent and carry the child count, so a
+// folded branch is visible as a branch rather than as a session with no
+// children.
+const parentFoldButton = collectAll(parentRow.children ?? []).find((node) => node.props?.className === 'tbi-foldBtn');
+if (parentFoldButton === undefined) {
+  throw new Error('the parent row has no fold control, so its children are unreachable');
+}
+const foldLabel = parentFoldButton.children?.find((child) => child?.[TEXT] !== undefined)?.[TEXT];
+console.log('fold control:', JSON.stringify(foldLabel));
+if (parentFoldButton.props['aria-expanded'] !== false) {
+  throw new Error('the fold control does not report the folded state');
+}
+// A folded branch has to say what is folded and how much of it: a bare count
+// next to a title is not something a reader can act on.
+if (!String(foldLabel).includes('1') || !String(foldLabel).includes(zh.subagent)) {
+  throw new Error(`the fold control does not say how many subagents it hides: ${foldLabel}`);
+}
+if (parentFoldButton.props['aria-label'] !== `1 ${zh.subagent}`) {
+  throw new Error(`the fold control is unlabelled for screen readers: ${parentFoldButton.props['aria-label']}`);
+}
+
+const detailsBefore = detailRowCount(foldNodes);
+const foldEvent = clickBubblingTo(parentFoldButton, parentRow);
+console.log('fold control swallowed the click:', foldEvent.stopped);
+foldNodes = await rerender();
+if (rowById(foldNodes, 'fold-child') === undefined) {
+  throw new Error('clicking the fold control did not reveal the subagent row');
+}
+// Unfolding a branch must not also open the parent's turn timeline: the row and
+// the fold control are separate targets.
+if (detailRowCount(foldNodes) !== detailsBefore) {
+  throw new Error('unfolding a branch also opened the turn timeline');
+}
+console.log('child row after unfold:', rowById(foldNodes, 'fold-child') !== undefined);
+
+// The child rows are indented under the parent, not flattened into the list.
+const childRow = rowById(foldNodes, 'fold-child');
+const childName = collectAll(childRow.children ?? []).find((node) => node.props?.className === 'tbi-sessionName');
+if (!String(childName?.props?.style?.paddingLeft ?? '').includes('22px')) {
+  throw new Error('an unfolded subagent row is not indented under its parent');
+}
+
+// Folding only draws less; it must not change a single number on the page.
+const headlineAfter = foldNodes.filter((node) => node.props?.className === 'tbi-figure').map((node) => JSON.stringify(node.children?.[0]?.[TEXT] ?? '')).join(',');
+if (headlineAfter !== headlineBefore) {
+  throw new Error(`folding changed the headline numbers: ${headlineBefore} -> ${headlineAfter}`);
+}
+
+// The call tree tracks the same branch state, and its fold pill must fold
+// without navigating away (the row itself is the "locate" target).
+const treePill = foldNodes.find((node) => node.props?.className === 'tbi-foldBtn' && node.props?.['data-sub'] === true);
+if (treePill === undefined) throw new Error('the call tree has no fold control for a parent with children');
+const parentTreeRow = foldNodes.find((node) => node.props?.className === 'tbi-treeRow' && node.props?.title === zh.locateSession && collectAll(node.children ?? []).some((leaf) => leaf?.[TEXT] === 'Fold parent session'));
+if (parentTreeRow === undefined) throw new Error('the call tree did not draw the parent session');
+const pillInsideParent = collectAll(parentTreeRow.children ?? []).find((node) => node.props?.className === 'tbi-foldBtn');
+if (pillInsideParent === undefined) throw new Error('the tree row for the parent has no fold pill');
+const lookupsBefore = domLookups.length;
+const treeFoldEvent = clickBubblingTo(pillInsideParent, parentTreeRow);
+if (!treeFoldEvent.stopped) {
+  throw new Error('the tree fold pill lets the click reach the row, so folding also jumps to the session table');
+}
+if (domLookups.length !== lookupsBefore) {
+  throw new Error(`folding from the call tree navigated to ${domLookups.slice(lookupsBefore).join(', ')}`);
+}
+const afterTreeFold = await rerender();
+if (afterTreeFold.some((node) => node.props?.className === 'tbi-treeRow' && collectAll(node.children ?? []).some((leaf) => leaf?.[TEXT] === 'Fold child session'))) {
+  throw new Error('folding from the call tree did not fold the branch');
+}
+// The tree keeps the parent's own/children split visible while folded, so the
+// bar still accounts for the hidden rows.
+const track = collectAll(parentTreeRow.children ?? []).find((node) => node.props?.className === 'tbi-treeTrack');
+if (track === undefined) throw new Error('the folded parent lost its bar');
+if (String(track.props.title).length === 0) throw new Error('the bar no longer explains own vs children');
+console.log('tree fold ok');
+//#endregion
+
+//#region aggregate route note
+// The aggregate provider is a virtual route; the card names the real channel
+// the host reports as currently active, without pretending the merged history
+// can be split. The test's Jet Hub stub answers "qodercn".
+const aggRow = foldNodes.find((node) => node.props?.className === 'tbi-barRow' && collectAll(node.children ?? []).some((leaf) => String(leaf?.[TEXT]).includes('aggregate')));
+if (aggRow === undefined) throw new Error('the synthetic aggregate model did not render a bar row');
+const aggText = collectAll(aggRow.children ?? []).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
+console.log('aggregate row:', JSON.stringify(aggText));
+if (!aggText.includes('qodercn')) {
+  throw new Error(`the aggregate row does not name its real channel: ${aggText}`);
+}
+// The hint only materialises on hover, through the Tooltip's show callback.
+if (typeof aggRow.props.onMouseEnter !== 'function') {
+  throw new Error('the aggregate row has no hover handler');
+}
+aggRow.props.onMouseEnter();
+let aggTip = '';
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  tree = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  const tipNodes = collectAll(tree).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
+  aggTip = tipNodes;
+  if (aggTip.includes(zh.aggregateHint) && !dirty) break;
+}
+if (!aggTip.includes(zh.aggregateHint)) {
+  throw new Error('the aggregate row lost its explanation tooltip');
+}
+//#endregion
 
 const titleNode = nodes.find((node) => node.tag === 'h1');
 console.log('h1:', titleNode?.children?.[0]?.[TEXT]);
