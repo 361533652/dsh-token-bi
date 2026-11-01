@@ -310,6 +310,18 @@ if (!firstReport.includes('refresh=1')) {
   throw new Error(`opening the page settled for the cached report: ${firstReport}`);
 }
 
+// The heatmap must catch up with the bar chart: every report load is followed
+// by a second /days fetch, so the calendar is never stuck on the snapshot the
+// host cached the last time the panel happened to open.
+const daysFetches = requests.filter((url) => url.includes('/days?'));
+const firstReportIndex = requests.indexOf(firstReport);
+const daysAfterReport = requests.slice(firstReportIndex + 1).filter((url) => url.includes('/days?'));
+console.log('days fetches:', daysFetches.length, '| after the report:', daysAfterReport.length);
+if (daysFetches.length === 0) throw new Error('the page never fetched the annual days for the heatmap');
+if (daysAfterReport.length === 0) {
+  throw new Error('a loaded report is not followed by a /days refetch, so the heatmap stays stale');
+}
+
 // Refreshing on the way back into the window is what stands in for polling.
 for (const expected of ['visibilitychange', 'window:focus']) {
   if (!listeners.includes(expected)) throw new Error(`page never listens for ${expected}, so a returning window shows a stale total`);
