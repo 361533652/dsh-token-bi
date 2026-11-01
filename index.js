@@ -263,7 +263,19 @@ export function apply(ctx) {
     if (storeRoot !== undefined) {
       try {
         const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays: 0 }, storeFingerprint(storeRoot), true);
-        if (hit !== undefined) return dailyFrom(hit.report, offsetMinutes, true);
+        if (hit !== undefined) {
+          // The annual cache is only ever rewritten as a side effect of a 30-day
+          // report build. While a conversation is running, the store moves with
+          // every turn, so the heatmap would otherwise keep answering with the
+          // snapshot taken the last time the panel happened to open — and the
+          // mismatch against the (fresh) bar chart was exactly that. When the
+          // entry is stale, rebuild the year behind the response the same way
+          // the report route does.
+          if (hit.stale === true) {
+            scheduleWarm(() => readReport(offsetMinutes, 0, false));
+          }
+          return dailyFrom(hit.report, offsetMinutes, true);
+        }
       } catch {
         // Fall through.
       }
