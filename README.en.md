@@ -172,13 +172,22 @@ Each event is bucketed into a **local** calendar day by its timestamp. The brows
 
 ### When it refreshes
 
-There is no timer in the page, and it does **not** listen for window focus. Exactly three triggers rebuild:
+There is no timer in the page, and it does **not** listen for window focus:
 
-- **Opening the bill.** The host mounts the page when the panel is opened and unmounts it when you switch away, so a mount *is* "just opened" — it asks for `refresh=1`, because the first number you see should be the number at the moment you looked, not a 10-second-old cache entry. This is the only automatic rebuild, and it happens once per open.
-- **Switching 7 days / 30 days / all.** Also a forced rebuild, so the preset you just clicked never shows a snapshot taken before the click.
-- The **Refresh** button at the top, for anything else.
+- **Opening the bill** reads the local database without a full sweep — milliseconds.
+- **Switching 7 days / 30 days / all** is a local slice — zero requests.
+- The **Refresh** button forces one full sync, the only path that walks the disk.
 
-Every other interaction — clicking a model row to filter, switching chart views, expanding a session, clicking a day, coming back from another window — leaves the numbers alone. The page never restarts under the pointer.
+Every other interaction — clicking a model row to filter, switching chart views, expanding a session, clicking a day, coming back from another window — leaves the numbers alone.
+
+### The persistent database
+
+The bill no longer re-reads the logs on every open. It maintains a local SQLite database at `<session store>/.token-bi-cache/ledger.db`:
+
+- **Incremental.** Each session records the `seq` it was folded up to, so a sync reads only the new tail of its log. An ordinary read takes about **3 ms**; the first open after a restart about **26 ms**.
+- **Aggregated on write.** The table holds day × channel × model × workspace totals, so a report is one SQL query rather than a fold over the logs.
+- **Deleting a session keeps its spend.** The row survives the log being removed. The bill records what was paid for, not what still exists on disk — deliberately.
+- **Rebuildable.** The database is derived; the logs are the source of truth. Refresh re-sweeps the disk and picks up anything it missed.
 
 ### Opening shows the last numbers, then refreshes behind them
 

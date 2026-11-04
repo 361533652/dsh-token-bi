@@ -304,15 +304,16 @@ for (let pass = 0; pass < 10; pass += 1) {
   if (!dirty) break;
 }
 
-// Opening the bill is what refreshes it. The host mounts the page when the
-// panel is opened, so the first report request has to skip the server cache —
-// otherwise the panel opens on a snapshot taken before the click, and there is
-// no timer behind it to correct the number a few seconds later.
+// Opening the bill asks the host for the ledger, deliberately *without* the
+// force flag. A forced read re-lists every session directory on disk (seconds,
+// on a large store) to discover sessions that appeared or vanished; the ledger
+// already folds what is live, so the ordinary read answers in milliseconds.
+// The Refresh button is the one that forces a full sweep.
 const firstReport = requests.find((url) => url.includes('/report?'));
 console.log('first report request:', firstReport);
 if (firstReport === undefined) throw new Error('opening the page issued no report request');
-if (!firstReport.includes('refresh=1')) {
-  throw new Error(`opening the page settled for the cached report: ${firstReport}`);
+if (firstReport.includes('refresh=1')) {
+  throw new Error(`opening the page forced a full sweep: ${firstReport}`);
 }
 
 // One request, for the whole history — and nothing else. The panel is not

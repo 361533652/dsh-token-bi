@@ -16,6 +16,8 @@
  */
 import { UsageCollector } from './lib/collector.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
+import { ledgerIsEmpty, openLedger } from './lib/ledger.mjs';
+import { rebuildLedger, syncLedger } from './lib/sync.mjs';
 
 /** The HTTP prefix this plugin owns. */
 const ROUTE = '/api/dsh-token-bi';
@@ -48,6 +50,47 @@ export function apply(ctx) {
   let building;
   /** Whether a background rebuild is already scheduled for this key. */
   let warming;
+  /**
+   * The persistent ledger, opened lazily on first use.
+   *
+   * It is the primary path: the whole report comes from SQLite, so opening the
+   * panel is a handful of scans instead of a fold over 184 MB of logs. When the
+   * database cannot be opened (no SQLite, unwritable directory, schema break)
+   * `ledger` stays `undefined` and the old fold path takes over — slower, but
+   * the panel still works.
+   */
+  let ledger;
+  let ledgerRoot;
+  let ledgerFailed = false;
+  /**
+   * When the store was last fully listed.
+   *
+   * A full sweep is what notices sessions that appeared or vanished on disk,
+   * and it costs seconds (`listSessions()` clones every header). An ordinary
+   * read therefore reuses the sweep result and folds only live sessions; a
+   * sweep is repeated at this interval so a session that ended between panel
+   * opens still lands in the ledger.
+   */
+  let lastFullSweep = Date.now();
+  const FULL_SWEEP_MS = 60_000;
+
+  const ledgerFor = (root) => {
+    if (ledgerFailed) return undefined;
+    if (ledger !== undefined && ledgerRoot === root) return ledger;
+    try {
+      const opened = openLedger(root);
+      if (opened === undefined) {
+        ledgerFailed = true;
+        return undefined;
+      }
+      ledger = opened;
+      ledgerRoot = root;
+      return ledger;
+    } catch {
+      ledgerFailed = true;
+      return undefined;
+    }
+  };
 
   /**
    * Assemble a report straight from the durable cache, without reading any log.
@@ -140,20 +183,83 @@ export function apply(ctx) {
   };
 
   /**
+   * The report, from the persistent ledger.
+   *
+   * The ledger is the primary path. It is kept current incrementally, so this
+   * is normally a handful of SQL scans over a ~350 KB database rather than a
+   * fold over the logs. `force` triggers a full resync, still incremental per
+   * session — only sessions whose log moved do any parsing.
+   *
+   * Returns `undefined` when the ledger cannot serve this request, and the
+   * caller falls back to the log fold.
+   */
+  const readFromLedger = async (offsetMinutes, force) => {
+    const storeRoot = resolveStoreRoot(ctx);
+    if (storeRoot === undefined) return undefined;
+    const db = ledgerFor(storeRoot);
+    if (db === undefined) return undefined;
+    try {
+      // A forced refresh (the Refresh button) does the full sweep, which is
+      // what discovers sessions that appeared or vanished on disk. An ordinary
+      // read reuses the last sweep and folds only the live sessions — that is
+      // the difference between milliseconds and several seconds.
+      //
+      // The one exception is an empty ledger: a fresh install has nothing to
+      // serve, so it must do the full sweep no matter how recently one ran.
+      const empty = ledgerIsEmpty(db);
+      const fullSweep = force === true || empty || Date.now() - lastFullSweep > FULL_SWEEP_MS;
+      const result = await syncLedger(ctx, db, offsetMinutes, { skipListed: fullSweep !== true });
+      if (fullSweep) lastFullSweep = Date.now();
+      const report = result.report;
+      // The ledger is all-time by nature; the page slices windows locally, so
+      // one shaped report serves every preset.
+      report.rangeDays = 0;
+      report.fromCache = false;
+      report.ledger = { folded: result.folded, reused: result.reused, added: result.added };
+      if (result.errors.length > 0) report.errors = result.errors;
+      return report;
+    } catch (error) {
+      // A broken ledger must not break the panel: fall back to folding logs.
+      ledgerFailed = true;
+      try {
+        ctx.logger?.warn?.(`[token-bi] ledger unavailable, falling back to log fold: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {
+        // Logging must never be the thing that breaks a request.
+      }
+      return undefined;
+    }
+  };
+
+  /**
    * Build (or reuse) the report for one window.
    *
    * Order of preference, cheapest first:
    *   1. the in-memory report, if it is younger than the TTL;
-   *   2. the durable cache, returned immediately (possibly stale) so the page
+   *   2. the persistent ledger (the primary path — SQL over a small database);
+   *   3. the durable cache, returned immediately (possibly stale) so the page
    *      paints at once, with a real rebuild kicked off behind it;
-   *   3. a full collect, per-session cached so only changed sessions are read.
+   *   4. a full collect, per-session cached so only changed sessions are read.
    */
   const readReport = async (offsetMinutes, rangeDays, force) => {
     const key = cacheKey(offsetMinutes, rangeDays);
+    // Within the TTL an identical request gets the identical answer; there is
+    // nothing to gain by touching the ledger again.
     if (!force && cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
       return cached.report;
     }
     if (building !== undefined && building.key === key) return building.promise;
+
+    // Ledger first: it is both the fastest path and the one that keeps spend
+    // after a session's log is deleted. A forced read does the full sweep
+    // (which finds sessions added or removed on disk); an ordinary one folds
+    // only what is live and answers in milliseconds.
+    {
+      const fromLedger = await readFromLedger(offsetMinutes, force);
+      if (fromLedger !== undefined) {
+        cached = { at: Date.now(), key, report: fromLedger };
+        return fromLedger;
+      }
+    }
 
     const startBuild = () => {
       if (building !== undefined && building.key === key) return building.promise;
