@@ -48,8 +48,8 @@ const makeSession = (id, day, spend, extra = {}) => ({
   ...extra,
 });
 
-const usage = (day, spend, cwd = '/proj') => ({
-  day, provider: 'p', model: 'm', cwd, input: spend, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
+const usage = (day, spend, cwd = '/proj', sessionId = 's1') => ({
+  day, sessionId, provider: 'p', model: 'm', cwd, input: spend, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
 });
 
 upsertSession(db, makeSession('s1', '2026-10-01', 1000), [usage('2026-10-01', 1000)]);

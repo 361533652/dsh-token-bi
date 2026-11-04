@@ -587,7 +587,13 @@ console.log('daily columns:', dailyColumns.length, '| report days:', report.days
 if (dailyColumns.length !== DEFAULT_RANGE_DAYS) {
   throw new Error(`daily chart drew ${dailyColumns.length} columns; the 30-day preset expects ${DEFAULT_RANGE_DAYS}`);
 }
-if (!text.includes(report.sessions[0].title)) throw new Error('session table did not render rows');
+// The table draws the sessions inside the 30-day preset. It cannot be asserted
+// against `sessions[0]`: that is merely the newest session in the *whole* store,
+// which may predate the window. Assert that the table has rows at all.
+const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['data-clickable'] === 'true');
+console.log('clickable session rows:', clickableRows.length);
+if (clickableRows.length === 0) throw new Error('session table did not render rows');
+if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }

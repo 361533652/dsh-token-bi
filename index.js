@@ -16,7 +16,7 @@
  */
 import { UsageCollector } from './lib/collector.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
-import { ledgerIsEmpty, openLedger } from './lib/ledger.mjs';
+import { markSeeded, needsSeed, openLedger } from './lib/ledger.mjs';
 import { rebuildLedger, syncLedger } from './lib/sync.mjs';
 
 /** The HTTP prefix this plugin owns. */
@@ -62,17 +62,6 @@ export function apply(ctx) {
   let ledger;
   let ledgerRoot;
   let ledgerFailed = false;
-  /**
-   * When the store was last fully listed.
-   *
-   * A full sweep is what notices sessions that appeared or vanished on disk,
-   * and it costs seconds (`listSessions()` clones every header). An ordinary
-   * read therefore reuses the sweep result and folds only live sessions; a
-   * sweep is repeated at this interval so a session that ended between panel
-   * opens still lands in the ledger.
-   */
-  let lastFullSweep = Date.now();
-  const FULL_SWEEP_MS = 60_000;
 
   const ledgerFor = (root) => {
     if (ledgerFailed) return undefined;
@@ -186,30 +175,34 @@ export function apply(ctx) {
    * The report, from the persistent ledger.
    *
    * The ledger is the primary path. It is kept current incrementally, so this
-   * is normally a handful of SQL scans over a ~350 KB database rather than a
-   * fold over the logs. `force` triggers a full resync, still incremental per
-   * session — only sessions whose log moved do any parsing.
+   * is a handful of SQL scans over a small database rather than a fold over the
+   * logs. The disk is walked exactly once, to seed the sessions that predate the
+   * plugin; afterwards new sessions arrive through the live list and nothing is
+   * ever re-scanned.
    *
    * Returns `undefined` when the ledger cannot serve this request, and the
    * caller falls back to the log fold.
    */
-  const readFromLedger = async (offsetMinutes, force) => {
+  const readFromLedger = async (offsetMinutes) => {
     const storeRoot = resolveStoreRoot(ctx);
     if (storeRoot === undefined) return undefined;
     const db = ledgerFor(storeRoot);
     if (db === undefined) return undefined;
     try {
-      // A forced refresh (the Refresh button) does the full sweep, which is
-      // what discovers sessions that appeared or vanished on disk. An ordinary
-      // read reuses the last sweep and folds only the live sessions — that is
-      // the difference between milliseconds and several seconds.
+      // The only time a full sweep is needed is the very first one, to seed the
+      // ledger with the sessions that already existed before this plugin was
+      // installed. After that the ledger is maintained incrementally:
       //
-      // The one exception is an empty ledger: a fresh install has nothing to
-      // serve, so it must do the full sweep no matter how recently one ran.
-      const empty = ledgerIsEmpty(db);
-      const fullSweep = force === true || empty || Date.now() - lastFullSweep > FULL_SWEEP_MS;
-      const result = await syncLedger(ctx, db, offsetMinutes, { skipListed: fullSweep !== true });
-      if (fullSweep) lastFullSweep = Date.now();
+      // - a new session is live from the instant it is created, so it arrives
+      //   through `ctx.sessions.list()` — a pure in-memory read;
+      // - a session that ends keeps its rows, because the bill records what was
+      //   spent and nothing ever deletes it;
+      // - so there is no reason to walk the disk ever again.
+      const seed = needsSeed(db);
+      const result = await syncLedger(ctx, db, offsetMinutes, { skipListed: seed !== true });
+      // One successful seed is enough forever: everything after it arrives
+      // through the live list.
+      if (seed) markSeeded(db);
       const report = result.report;
       // The ledger is all-time by nature; the page slices windows locally, so
       // one shaped report serves every preset.
@@ -240,21 +233,19 @@ export function apply(ctx) {
    *      paints at once, with a real rebuild kicked off behind it;
    *   4. a full collect, per-session cached so only changed sessions are read.
    */
-  const readReport = async (offsetMinutes, rangeDays, force) => {
+  const readReport = async (offsetMinutes, rangeDays) => {
     const key = cacheKey(offsetMinutes, rangeDays);
     // Within the TTL an identical request gets the identical answer; there is
     // nothing to gain by touching the ledger again.
-    if (!force && cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
+    if (cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
       return cached.report;
     }
     if (building !== undefined && building.key === key) return building.promise;
 
     // Ledger first: it is both the fastest path and the one that keeps spend
-    // after a session's log is deleted. A forced read does the full sweep
-    // (which finds sessions added or removed on disk); an ordinary one folds
-    // only what is live and answers in milliseconds.
+    // after a session's log is deleted.
     {
-      const fromLedger = await readFromLedger(offsetMinutes, force);
+      const fromLedger = await readFromLedger(offsetMinutes);
       if (fromLedger !== undefined) {
         cached = { at: Date.now(), key, report: fromLedger };
         return fromLedger;
@@ -313,9 +304,6 @@ export function apply(ctx) {
       building = { key, promise };
       return promise;
     };
-
-    // A forced refresh always rebuilds.
-    if (force) return startBuild();
 
     // Cheapest path: a finished report for this window. A perfect fingerprint
     // match means it is exactly current; otherwise it is still the right shape
@@ -378,7 +366,7 @@ export function apply(ctx) {
           // entry is stale, rebuild the year behind the response the same way
           // the report route does.
           if (hit.stale === true) {
-            scheduleWarm(() => readReport(offsetMinutes, 0, false));
+            scheduleWarm(() => readReport(offsetMinutes, 0));
           }
           return dailyFrom(hit.report, offsetMinutes, true);
         }
@@ -393,11 +381,11 @@ export function apply(ctx) {
     // loading state this change is meant to remove.
     const warm = cached?.report;
     if (warm !== undefined && Array.isArray(warm.days) && warm.days.length > 0) {
-      scheduleWarm(() => readReport(offsetMinutes, 0, false));
+      scheduleWarm(() => readReport(offsetMinutes, 0));
       return dailyFrom(warm, offsetMinutes, true);
     }
 
-    scheduleWarm(() => readReport(offsetMinutes, 0, false));
+    scheduleWarm(() => readReport(offsetMinutes, 0));
     return { generatedAt: Date.now(), offsetMinutes, rangeDays: 0, days: [], fromCache: true, pending: true };
   };;
 
@@ -441,7 +429,7 @@ export function apply(ctx) {
     const rangeDays = parseRange(url.searchParams.get('days'));
     try {
       if (path === `${ROUTE}/report`) {
-        sendJson(res, 200, await readReport(offsetMinutes, rangeDays, url.searchParams.get('refresh') === '1'));
+        sendJson(res, 200, await readReport(offsetMinutes, rangeDays));
         return;
       }
       if (path === `${ROUTE}/days`) {
