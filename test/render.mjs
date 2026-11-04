@@ -322,11 +322,23 @@ if (daysAfterReport.length === 0) {
   throw new Error('a loaded report is not followed by a /days refetch, so the heatmap stays stale');
 }
 
-// Refreshing on the way back into the window is what stands in for polling.
-for (const expected of ['visibilitychange', 'window:focus']) {
-  if (!listeners.includes(expected)) throw new Error(`page never listens for ${expected}, so a returning window shows a stale total`);
+// Exactly one automatic rebuild: the mount. No focus or visibility listener may
+// exist, because those turn ordinary interaction (clicking a filter, opening a
+// row, coming back from another window) into a forced rebuild — the page then
+// restarts under the pointer on every click.
+const autoRefreshListeners = listeners.filter((type) => type === 'visibilitychange' || type === 'window:focus');
+console.log('listeners:', listeners.join(', ') || '(none)');
+if (autoRefreshListeners.length > 0) {
+  throw new Error(`page still rebuilds on interaction: ${autoRefreshListeners.join(', ')}`);
 }
-console.log('listeners:', listeners.join(', '));
+// ...and the mount must rebuild exactly once. Two report requests on mount
+// would mean a duplicate build (the effect ran twice) — the panel would show
+// the spinner twice for the same open.
+const reportRequests = requests.filter((url) => url.includes('/report?'));
+console.log('report requests on mount:', reportRequests.length);
+if (reportRequests.length !== 1) {
+  throw new Error(`mount issued ${reportRequests.length} report requests; exactly one rebuild is allowed`);
+}
 
 const nodes = [];
 const walk = (list) => {
