@@ -182,7 +182,10 @@ report.models = [...(report.models ?? []), {
 // A parent with a delegated child, so folding can be checked whatever the
 // local session store happens to contain. Both are stamped long ago, which
 // keeps them at the bottom of the table — the drill-down above clicks the first
-// row, and that has to stay the real, most recent session.
+// row, and that has to stay the real, most recent session. They are anchored on
+// the newest day the fixture covers, because the page slices the report by
+// window now and a session must fall inside the drawn window to appear at all.
+const newestDay = report.days[report.days.length - 1].day;
 const syntheticTotals = (total) => ({ input: total, output: 0, cacheRead: 0, cacheWrite: 0, total });
 report.sessions.push(
   {
@@ -196,7 +199,8 @@ report.sessions.push(
     live: false,
     firstTime: 1,
     lastTime: 1,
-    days: [],
+    days: [newestDay],
+    turnDays: { 1: newestDay },
   },
   {
     id: 'fold-child',
@@ -209,7 +213,8 @@ report.sessions.push(
     live: false,
     firstTime: 1,
     lastTime: 1,
-    days: [],
+    days: [newestDay],
+    turnDays: { 1: newestDay },
   },
 );
 
@@ -310,16 +315,19 @@ if (!firstReport.includes('refresh=1')) {
   throw new Error(`opening the page settled for the cached report: ${firstReport}`);
 }
 
-// The heatmap must catch up with the bar chart: every report load is followed
-// by a second /days fetch, so the calendar is never stuck on the snapshot the
-// host cached the last time the panel happened to open.
-const daysFetches = requests.filter((url) => url.includes('/days?'));
-const firstReportIndex = requests.indexOf(firstReport);
-const daysAfterReport = requests.slice(firstReportIndex + 1).filter((url) => url.includes('/days?'));
-console.log('days fetches:', daysFetches.length, '| after the report:', daysAfterReport.length);
-if (daysFetches.length === 0) throw new Error('the page never fetched the annual days for the heatmap');
-if (daysAfterReport.length === 0) {
-  throw new Error('a loaded report is not followed by a /days refetch, so the heatmap stays stale');
+// One request, for the whole history — and nothing else. The panel is not
+// allowed to reach the host again while the user works: windows are slices of
+// the report already in memory, so switching 7 / 30 / all costs no request.
+const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/'));
+console.log('data requests on mount:', dataRequests.length, '|', dataRequests.join(', '));
+if (dataRequests.length !== 1) {
+  throw new Error(`mount issued ${dataRequests.length} data requests; exactly one report is allowed: ${dataRequests.join(', ')}`);
+}
+if (requests.some((url) => url.includes('/days?'))) {
+  throw new Error('the page still asks for the annual days separately; the whole report already carries them');
+}
+if (!firstReport.includes('days=0')) {
+  throw new Error(`the report must be the whole history, so windows can be sliced locally: ${firstReport}`);
 }
 
 // Exactly one automatic rebuild: the mount. No focus or visibility listener may
@@ -569,17 +577,41 @@ console.log('h1:', titleNode?.children?.[0]?.[TEXT]);
 
 if (text.trim().length < 400) throw new Error('page rendered almost nothing');
 if ((tags.get('rect') ?? 0) < 4) throw new Error('daily chart produced no bars');
-// A window wider than 30 days must not be truncated on the chart, otherwise
-// older single-day spend is visible in the heatmap but missing from the bars.
+// The default preset is 30 days, drawn as 30 columns for a report spanning far
+// more than that. A chart that drew every day of the report would ignore the
+// preset; a chart that drew fewer would drop days it was asked for.
+const DEFAULT_RANGE_DAYS = 30;
 const dailyColumns = nodes.filter((node) => node.props?.className === 'tbi-col');
-console.log('daily columns:', dailyColumns.length, 'window days:', report.days.length);
-if (dailyColumns.length !== report.days.length) {
-  throw new Error(`daily chart drew ${dailyColumns.length} columns for a ${report.days.length}-day window`);
+console.log('daily columns:', dailyColumns.length, '| report days:', report.days.length);
+if (dailyColumns.length !== DEFAULT_RANGE_DAYS) {
+  throw new Error(`daily chart drew ${dailyColumns.length} columns; the 30-day preset expects ${DEFAULT_RANGE_DAYS}`);
 }
 if (!text.includes(report.sessions[0].title)) throw new Error('session table did not render rows');
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }
+
+//#region window switching is local
+// The whole point of holding one all-time report: switching preset must be a
+// local slice, never a request. Click each preset and assert nothing goes out.
+const rangeButtons = nodes.filter((node) => node.props?.className === 'tbi-segBtn');
+console.log('range buttons:', rangeButtons.length);
+if (rangeButtons.length !== 3) throw new Error(`expected three presets, found ${rangeButtons.length}`);
+const requestsBeforeRange = requests.length;
+for (const button of rangeButtons) button.props.onClick();
+const rangeNodes = await rerender();
+console.log('requests added by preset switching:', requests.length - requestsBeforeRange);
+if (requests.length !== requestsBeforeRange) {
+  throw new Error(`switching preset issued ${requests.length - requestsBeforeRange} request(s); windows must be sliced locally`);
+}
+const heatmapCols = rangeNodes.filter((node) => node.props?.className === 'tbi-col').length;
+console.log('daily columns after preset switching:', heatmapCols, '| all-time days:', report.days.length);
+// The last preset clicked is "all", which really does draw every day in the
+// report — the proof that a window is a *slice* and not a truncated view.
+if (heatmapCols !== report.days.length) {
+  throw new Error(`"all" drew ${heatmapCols} columns for a ${report.days.length}-day history`);
+}
+//#endregion
 
 // The model/workspace labels truncate, so hovering must reveal the untruncated
 // identity. A native `title` carrying only the model name was not enough: the
