@@ -710,6 +710,18 @@ if (!(declared > 0)) {
   throw new Error(`a day with spend claims ${declared} sessions: ${JSON.stringify(dayTipText)}`);
 }
 
+// The day tooltip also carries the cache hit share, on the same basis as the
+// headline figure (cacheRead over the day's four buckets). Without it, a day
+// could only be judged by its raw cacheRead, which says nothing about how much
+// of that day's prompt traffic was served from cache.
+const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
+console.log('cache share line:', JSON.stringify(shareLine ?? ''));
+if (shareLine === undefined) throw new Error('the day tooltip lost its cache share line');
+const shareMatch = /^(\d+\.\d)%$/.exec(String(shareLine).replace(zh.cacheShare, '').trim());
+if (shareMatch === null) throw new Error(`the cache share is not a percentage: ${JSON.stringify(shareLine)}`);
+const share = Number(shareMatch[1]);
+if (!(share >= 0 && share <= 100)) throw new Error(`the cache share is out of range: ${share}`);
+
 // The headline figures must publish the exact count for copying.
 const exactLines = nodes.filter((node) => node.props?.className === 'tbi-figureExact');
 console.log('exact-count lines:', exactLines.length, exactLines.map((node) => node.children?.[0]?.[TEXT] ?? '').join(' | '));
