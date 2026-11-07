@@ -16,6 +16,8 @@
  */
 import { UsageCollector } from './lib/collector.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
+import { markSeeded, needsSeed, openLedger } from './lib/ledger.mjs';
+import { rebuildLedger, syncLedger } from './lib/sync.mjs';
 
 /** The HTTP prefix this plugin owns. */
 const ROUTE = '/api/dsh-token-bi';
@@ -48,6 +50,36 @@ export function apply(ctx) {
   let building;
   /** Whether a background rebuild is already scheduled for this key. */
   let warming;
+  /**
+   * The persistent ledger, opened lazily on first use.
+   *
+   * It is the primary path: the whole report comes from SQLite, so opening the
+   * panel is a handful of scans instead of a fold over 184 MB of logs. When the
+   * database cannot be opened (no SQLite, unwritable directory, schema break)
+   * `ledger` stays `undefined` and the old fold path takes over — slower, but
+   * the panel still works.
+   */
+  let ledger;
+  let ledgerRoot;
+  let ledgerFailed = false;
+
+  const ledgerFor = (root) => {
+    if (ledgerFailed) return undefined;
+    if (ledger !== undefined && ledgerRoot === root) return ledger;
+    try {
+      const opened = openLedger(root);
+      if (opened === undefined) {
+        ledgerFailed = true;
+        return undefined;
+      }
+      ledger = opened;
+      ledgerRoot = root;
+      return ledger;
+    } catch {
+      ledgerFailed = true;
+      return undefined;
+    }
+  };
 
   /**
    * Assemble a report straight from the durable cache, without reading any log.
@@ -140,20 +172,85 @@ export function apply(ctx) {
   };
 
   /**
+   * The report, from the persistent ledger.
+   *
+   * The ledger is the primary path. It is kept current incrementally, so this
+   * is a handful of SQL scans over a small database rather than a fold over the
+   * logs. The disk is walked exactly once, to seed the sessions that predate the
+   * plugin; afterwards new sessions arrive through the live list and nothing is
+   * ever re-scanned.
+   *
+   * Returns `undefined` when the ledger cannot serve this request, and the
+   * caller falls back to the log fold.
+   */
+  const readFromLedger = async (offsetMinutes) => {
+    const storeRoot = resolveStoreRoot(ctx);
+    if (storeRoot === undefined) return undefined;
+    const db = ledgerFor(storeRoot);
+    if (db === undefined) return undefined;
+    try {
+      // The only time a full sweep is needed is the very first one, to seed the
+      // ledger with the sessions that already existed before this plugin was
+      // installed. After that the ledger is maintained incrementally:
+      //
+      // - a new session is live from the instant it is created, so it arrives
+      //   through `ctx.sessions.list()` — a pure in-memory read;
+      // - a session that ends keeps its rows, because the bill records what was
+      //   spent and nothing ever deletes it;
+      // - so there is no reason to walk the disk ever again.
+      const seed = needsSeed(db);
+      const result = await syncLedger(ctx, db, offsetMinutes, { skipListed: seed !== true });
+      // One successful seed is enough forever: everything after it arrives
+      // through the live list.
+      if (seed) markSeeded(db);
+      const report = result.report;
+      // The ledger is all-time by nature; the page slices windows locally, so
+      // one shaped report serves every preset.
+      report.rangeDays = 0;
+      report.fromCache = false;
+      report.ledger = { folded: result.folded, reused: result.reused, added: result.added };
+      if (result.errors.length > 0) report.errors = result.errors;
+      return report;
+    } catch (error) {
+      // A broken ledger must not break the panel: fall back to folding logs.
+      ledgerFailed = true;
+      try {
+        ctx.logger?.warn?.(`[token-bi] ledger unavailable, falling back to log fold: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {
+        // Logging must never be the thing that breaks a request.
+      }
+      return undefined;
+    }
+  };
+
+  /**
    * Build (or reuse) the report for one window.
    *
    * Order of preference, cheapest first:
    *   1. the in-memory report, if it is younger than the TTL;
-   *   2. the durable cache, returned immediately (possibly stale) so the page
+   *   2. the persistent ledger (the primary path — SQL over a small database);
+   *   3. the durable cache, returned immediately (possibly stale) so the page
    *      paints at once, with a real rebuild kicked off behind it;
-   *   3. a full collect, per-session cached so only changed sessions are read.
+   *   4. a full collect, per-session cached so only changed sessions are read.
    */
-  const readReport = async (offsetMinutes, rangeDays, force) => {
+  const readReport = async (offsetMinutes, rangeDays) => {
     const key = cacheKey(offsetMinutes, rangeDays);
-    if (!force && cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
+    // Within the TTL an identical request gets the identical answer; there is
+    // nothing to gain by touching the ledger again.
+    if (cached !== undefined && cached.key === key && Date.now() - cached.at < REPORT_TTL_MS) {
       return cached.report;
     }
     if (building !== undefined && building.key === key) return building.promise;
+
+    // Ledger first: it is both the fastest path and the one that keeps spend
+    // after a session's log is deleted.
+    {
+      const fromLedger = await readFromLedger(offsetMinutes);
+      if (fromLedger !== undefined) {
+        cached = { at: Date.now(), key, report: fromLedger };
+        return fromLedger;
+      }
+    }
 
     const startBuild = () => {
       if (building !== undefined && building.key === key) return building.promise;
@@ -207,9 +304,6 @@ export function apply(ctx) {
       building = { key, promise };
       return promise;
     };
-
-    // A forced refresh always rebuilds.
-    if (force) return startBuild();
 
     // Cheapest path: a finished report for this window. A perfect fingerprint
     // match means it is exactly current; otherwise it is still the right shape
@@ -272,7 +366,7 @@ export function apply(ctx) {
           // entry is stale, rebuild the year behind the response the same way
           // the report route does.
           if (hit.stale === true) {
-            scheduleWarm(() => readReport(offsetMinutes, 0, false));
+            scheduleWarm(() => readReport(offsetMinutes, 0));
           }
           return dailyFrom(hit.report, offsetMinutes, true);
         }
@@ -287,11 +381,11 @@ export function apply(ctx) {
     // loading state this change is meant to remove.
     const warm = cached?.report;
     if (warm !== undefined && Array.isArray(warm.days) && warm.days.length > 0) {
-      scheduleWarm(() => readReport(offsetMinutes, 0, false));
+      scheduleWarm(() => readReport(offsetMinutes, 0));
       return dailyFrom(warm, offsetMinutes, true);
     }
 
-    scheduleWarm(() => readReport(offsetMinutes, 0, false));
+    scheduleWarm(() => readReport(offsetMinutes, 0));
     return { generatedAt: Date.now(), offsetMinutes, rangeDays: 0, days: [], fromCache: true, pending: true };
   };;
 
@@ -335,7 +429,7 @@ export function apply(ctx) {
     const rangeDays = parseRange(url.searchParams.get('days'));
     try {
       if (path === `${ROUTE}/report`) {
-        sendJson(res, 200, await readReport(offsetMinutes, rangeDays, url.searchParams.get('refresh') === '1'));
+        sendJson(res, 200, await readReport(offsetMinutes, rangeDays));
         return;
       }
       if (path === `${ROUTE}/days`) {

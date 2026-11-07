@@ -182,7 +182,10 @@ report.models = [...(report.models ?? []), {
 // A parent with a delegated child, so folding can be checked whatever the
 // local session store happens to contain. Both are stamped long ago, which
 // keeps them at the bottom of the table — the drill-down above clicks the first
-// row, and that has to stay the real, most recent session.
+// row, and that has to stay the real, most recent session. They are anchored on
+// the newest day the fixture covers, because the page slices the report by
+// window now and a session must fall inside the drawn window to appear at all.
+const newestDay = report.days[report.days.length - 1].day;
 const syntheticTotals = (total) => ({ input: total, output: 0, cacheRead: 0, cacheWrite: 0, total });
 report.sessions.push(
   {
@@ -196,7 +199,8 @@ report.sessions.push(
     live: false,
     firstTime: 1,
     lastTime: 1,
-    days: [],
+    days: [newestDay],
+    turnDays: { 1: newestDay },
   },
   {
     id: 'fold-child',
@@ -209,7 +213,8 @@ report.sessions.push(
     live: false,
     firstTime: 1,
     lastTime: 1,
-    days: [],
+    days: [newestDay],
+    turnDays: { 1: newestDay },
   },
 );
 
@@ -299,34 +304,50 @@ for (let pass = 0; pass < 10; pass += 1) {
   if (!dirty) break;
 }
 
-// Opening the bill is what refreshes it. The host mounts the page when the
-// panel is opened, so the first report request has to skip the server cache —
-// otherwise the panel opens on a snapshot taken before the click, and there is
-// no timer behind it to correct the number a few seconds later.
+// Opening the bill asks the host for the ledger, deliberately *without* the
+// force flag. A forced read re-lists every session directory on disk (seconds,
+// on a large store) to discover sessions that appeared or vanished; the ledger
+// already folds what is live, so the ordinary read answers in milliseconds.
+// The Refresh button is the one that forces a full sweep.
 const firstReport = requests.find((url) => url.includes('/report?'));
 console.log('first report request:', firstReport);
 if (firstReport === undefined) throw new Error('opening the page issued no report request');
-if (!firstReport.includes('refresh=1')) {
-  throw new Error(`opening the page settled for the cached report: ${firstReport}`);
+if (firstReport.includes('refresh=1')) {
+  throw new Error(`opening the page forced a full sweep: ${firstReport}`);
 }
 
-// The heatmap must catch up with the bar chart: every report load is followed
-// by a second /days fetch, so the calendar is never stuck on the snapshot the
-// host cached the last time the panel happened to open.
-const daysFetches = requests.filter((url) => url.includes('/days?'));
-const firstReportIndex = requests.indexOf(firstReport);
-const daysAfterReport = requests.slice(firstReportIndex + 1).filter((url) => url.includes('/days?'));
-console.log('days fetches:', daysFetches.length, '| after the report:', daysAfterReport.length);
-if (daysFetches.length === 0) throw new Error('the page never fetched the annual days for the heatmap');
-if (daysAfterReport.length === 0) {
-  throw new Error('a loaded report is not followed by a /days refetch, so the heatmap stays stale');
+// One request, for the whole history — and nothing else. The panel is not
+// allowed to reach the host again while the user works: windows are slices of
+// the report already in memory, so switching 7 / 30 / all costs no request.
+const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/'));
+console.log('data requests on mount:', dataRequests.length, '|', dataRequests.join(', '));
+if (dataRequests.length !== 1) {
+  throw new Error(`mount issued ${dataRequests.length} data requests; exactly one report is allowed: ${dataRequests.join(', ')}`);
+}
+if (requests.some((url) => url.includes('/days?'))) {
+  throw new Error('the page still asks for the annual days separately; the whole report already carries them');
+}
+if (!firstReport.includes('days=0')) {
+  throw new Error(`the report must be the whole history, so windows can be sliced locally: ${firstReport}`);
 }
 
-// Refreshing on the way back into the window is what stands in for polling.
-for (const expected of ['visibilitychange', 'window:focus']) {
-  if (!listeners.includes(expected)) throw new Error(`page never listens for ${expected}, so a returning window shows a stale total`);
+// Exactly one automatic rebuild: the mount. No focus or visibility listener may
+// exist, because those turn ordinary interaction (clicking a filter, opening a
+// row, coming back from another window) into a forced rebuild — the page then
+// restarts under the pointer on every click.
+const autoRefreshListeners = listeners.filter((type) => type === 'visibilitychange' || type === 'window:focus');
+console.log('listeners:', listeners.join(', ') || '(none)');
+if (autoRefreshListeners.length > 0) {
+  throw new Error(`page still rebuilds on interaction: ${autoRefreshListeners.join(', ')}`);
 }
-console.log('listeners:', listeners.join(', '));
+// ...and the mount must rebuild exactly once. Two report requests on mount
+// would mean a duplicate build (the effect ran twice) — the panel would show
+// the spinner twice for the same open.
+const reportRequests = requests.filter((url) => url.includes('/report?'));
+console.log('report requests on mount:', reportRequests.length);
+if (reportRequests.length !== 1) {
+  throw new Error(`mount issued ${reportRequests.length} report requests; exactly one rebuild is allowed`);
+}
 
 const nodes = [];
 const walk = (list) => {
@@ -557,17 +578,47 @@ console.log('h1:', titleNode?.children?.[0]?.[TEXT]);
 
 if (text.trim().length < 400) throw new Error('page rendered almost nothing');
 if ((tags.get('rect') ?? 0) < 4) throw new Error('daily chart produced no bars');
-// A window wider than 30 days must not be truncated on the chart, otherwise
-// older single-day spend is visible in the heatmap but missing from the bars.
+// The default preset is 30 days, drawn as 30 columns for a report spanning far
+// more than that. A chart that drew every day of the report would ignore the
+// preset; a chart that drew fewer would drop days it was asked for.
+const DEFAULT_RANGE_DAYS = 30;
 const dailyColumns = nodes.filter((node) => node.props?.className === 'tbi-col');
-console.log('daily columns:', dailyColumns.length, 'window days:', report.days.length);
-if (dailyColumns.length !== report.days.length) {
-  throw new Error(`daily chart drew ${dailyColumns.length} columns for a ${report.days.length}-day window`);
+console.log('daily columns:', dailyColumns.length, '| report days:', report.days.length);
+if (dailyColumns.length !== DEFAULT_RANGE_DAYS) {
+  throw new Error(`daily chart drew ${dailyColumns.length} columns; the 30-day preset expects ${DEFAULT_RANGE_DAYS}`);
 }
-if (!text.includes(report.sessions[0].title)) throw new Error('session table did not render rows');
+// The table draws the sessions inside the 30-day preset. It cannot be asserted
+// against `sessions[0]`: that is merely the newest session in the *whole* store,
+// which may predate the window. Assert that the table has rows at all.
+const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['data-clickable'] === 'true');
+console.log('clickable session rows:', clickableRows.length);
+if (clickableRows.length === 0) throw new Error('session table did not render rows');
+if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }
+
+//#region window switching is local
+// The whole point of holding one all-time report: switching preset must be a
+// local slice, never a request. Click each preset and assert nothing goes out.
+const rangeButtons = nodes.filter((node) => node.props?.className === 'tbi-segBtn');
+console.log('range buttons:', rangeButtons.length);
+if (rangeButtons.length !== 3) throw new Error(`expected three presets, found ${rangeButtons.length}`);
+const requestsBeforeRange = requests.length;
+for (const button of rangeButtons) button.props.onClick();
+const rangeNodes = await rerender();
+console.log('requests added by preset switching:', requests.length - requestsBeforeRange);
+if (requests.length !== requestsBeforeRange) {
+  throw new Error(`switching preset issued ${requests.length - requestsBeforeRange} request(s); windows must be sliced locally`);
+}
+const heatmapCols = rangeNodes.filter((node) => node.props?.className === 'tbi-col').length;
+console.log('daily columns after preset switching:', heatmapCols, '| all-time days:', report.days.length);
+// The last preset clicked is "all", which really does draw every day in the
+// report — the proof that a window is a *slice* and not a truncated view.
+if (heatmapCols !== report.days.length) {
+  throw new Error(`"all" drew ${heatmapCols} columns for a ${report.days.length}-day history`);
+}
+//#endregion
 
 // The model/workspace labels truncate, so hovering must reveal the untruncated
 // identity. A native `title` carrying only the model name was not enough: the
@@ -619,6 +670,69 @@ if (tipText.split('\n').length < 3) {
 if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
   throw new Error('bar tooltip omits the token count');
 }
+
+//#region headline exact counts and the bar tooltip's session count
+// The bar tooltip used to report "0 sessions" on every day: the window slice
+// rebuilt the day rows without carrying the session count through. A day that
+// has spend but claims zero sessions is a lie the tooltip told on every hover.
+const dayTips = nodes.filter((node) => node.props?.className === 'tbi-col');
+if (dayTips.length === 0) throw new Error('no day columns to hover');
+const firstBusy = dayTips.find((node) => {
+  const rect = (node.children ?? []).find((child) => child?.tag === 'rect');
+  return rect !== undefined && Number(rect.props?.height) > 10;
+});
+if (firstBusy === undefined) throw new Error('no busy day column to inspect');
+const tipLines = String(firstBusy.props.onMouseEnter ?? '').length > 0 ? 'has handler' : 'no handler';
+console.log('busy day column:', tipLines);
+
+// Hover a busy day and read the session count off the tooltip. The window slice
+// used to drop that field, so every day claimed "0 sessions" even on days with
+// real spend.
+firstBusy.props.onMouseEnter();
+let dayTipText = '';
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  tree = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  const hoverNodes = walkCurrent();
+  const tip = hoverNodes.find((node) => node.props?.className === 'tbi-tooltip');
+  dayTipText = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (dayTipText.length > 0 && !dirty) break;
+}
+console.log('day tooltip:', JSON.stringify(dayTipText));
+const sessionLine = dayTipText.split('\n').find((line) => line.includes(zh.sessionsUnit));
+console.log('session line:', JSON.stringify(sessionLine ?? ''));
+if (sessionLine === undefined) throw new Error('the day tooltip lost its session line');
+const declared = Number(String(sessionLine).replace(/[^\d]/g, ''));
+if (!(declared > 0)) {
+  throw new Error(`a day with spend claims ${declared} sessions: ${JSON.stringify(dayTipText)}`);
+}
+
+// The day tooltip also carries the cache hit share, on the same basis as the
+// headline figure (cacheRead over the day's four buckets). Without it, a day
+// could only be judged by its raw cacheRead, which says nothing about how much
+// of that day's prompt traffic was served from cache.
+const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
+console.log('cache share line:', JSON.stringify(shareLine ?? ''));
+if (shareLine === undefined) throw new Error('the day tooltip lost its cache share line');
+const shareMatch = /^(\d+\.\d)%$/.exec(String(shareLine).replace(zh.cacheShare, '').trim());
+if (shareMatch === null) throw new Error(`the cache share is not a percentage: ${JSON.stringify(shareLine)}`);
+const share = Number(shareMatch[1]);
+if (!(share >= 0 && share <= 100)) throw new Error(`the cache share is out of range: ${share}`);
+
+// The headline figures must publish the exact count for copying.
+const exactLines = nodes.filter((node) => node.props?.className === 'tbi-figureExact');
+console.log('exact-count lines:', exactLines.length, exactLines.map((node) => node.children?.[0]?.[TEXT] ?? '').join(' | '));
+if (exactLines.length < 2) throw new Error('the cumulative and today figures must both expose an exact count');
+for (const line of exactLines.slice(0, 2)) {
+  const text = String(line.children?.[0]?.[TEXT] ?? '');
+  // `exact()` prints digit groups, which is what makes the number readable and
+  // still pasteable; the check only insists it is a count, not prose.
+  if (!/^\d[\d,]*$/.test(text)) throw new Error(`an exact count is not a number: ${JSON.stringify(text)}`);
+}
+//#endregion
 
 // Nothing on this page may carry a timer: a panel left open, or sitting in the
 // background, has to cost nothing.

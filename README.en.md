@@ -172,14 +172,22 @@ Each event is bucketed into a **local** calendar day by its timestamp. The brows
 
 ### When it refreshes
 
-There is no timer in the page; every rebuild is caused by something the user did:
+There is no timer in the page, no Refresh button, and it does **not** listen for window focus:
 
-- **Opening the bill.** The host mounts the page when the panel is opened and unmounts it when you switch away, so a mount *is* "just opened" — it asks for `refresh=1`, because the first number you see should be the number at the moment you looked, not a 10-second-old cache entry.
-- **Switching 7 days / 30 days / all.** Also a forced rebuild, so the preset you just clicked never shows a snapshot taken before the click.
-- **Coming back to the window** (`visibilitychange` / `focus`): one rebuild on the way back in; nothing is sent while the window is in the background.
-- The **Refresh** button at the top, for anything else.
+- **Opening the bill** reads the local database — a few milliseconds.
+- **Switching 7 days / 30 days / all** is a local slice — zero requests.
+- **A new session** lands as soon as it is created, through the in-memory list. No disk scan.
 
-Left open and untouched, the numbers simply sit still — an open panel costs nothing in the background.
+Every other interaction — clicking a model row to filter, switching chart views, expanding a session, clicking a day, coming back from another window — triggers nothing.
+
+### The persistent database
+
+The bill no longer re-reads the logs on every open. It maintains a local SQLite database at `<session store>/.token-bi-cache/ledger.db`:
+
+- **One disk walk, ever.** The first open after install counts the existing sessions to seed the ledger; nothing scans the store again.
+- **Incremental.** Each session records the `seq` it was folded up to, so a sync reads only the new tail of its log. A read takes about **5 ms**.
+- **Aggregated on write.** The table holds day × session × channel × model × workspace totals, so a report is one SQL query.
+- **Deleting a session keeps its spend.** The row survives the log being removed. The bill records what was paid for, not what still exists on disk — deliberately.
 
 ### Opening shows the last numbers, then refreshes behind them
 
