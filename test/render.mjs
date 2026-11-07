@@ -671,6 +671,57 @@ if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
   throw new Error('bar tooltip omits the token count');
 }
 
+//#region headline exact counts and the bar tooltip's session count
+// The bar tooltip used to report "0 sessions" on every day: the window slice
+// rebuilt the day rows without carrying the session count through. A day that
+// has spend but claims zero sessions is a lie the tooltip told on every hover.
+const dayTips = nodes.filter((node) => node.props?.className === 'tbi-col');
+if (dayTips.length === 0) throw new Error('no day columns to hover');
+const firstBusy = dayTips.find((node) => {
+  const rect = (node.children ?? []).find((child) => child?.tag === 'rect');
+  return rect !== undefined && Number(rect.props?.height) > 10;
+});
+if (firstBusy === undefined) throw new Error('no busy day column to inspect');
+const tipLines = String(firstBusy.props.onMouseEnter ?? '').length > 0 ? 'has handler' : 'no handler';
+console.log('busy day column:', tipLines);
+
+// Hover a busy day and read the session count off the tooltip. The window slice
+// used to drop that field, so every day claimed "0 sessions" even on days with
+// real spend.
+firstBusy.props.onMouseEnter();
+let dayTipText = '';
+for (let pass = 0; pass < 6; pass += 1) {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  tree = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  const hoverNodes = walkCurrent();
+  const tip = hoverNodes.find((node) => node.props?.className === 'tbi-tooltip');
+  dayTipText = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (dayTipText.length > 0 && !dirty) break;
+}
+console.log('day tooltip:', JSON.stringify(dayTipText));
+const sessionLine = dayTipText.split('\n').find((line) => line.includes(zh.sessionsUnit));
+console.log('session line:', JSON.stringify(sessionLine ?? ''));
+if (sessionLine === undefined) throw new Error('the day tooltip lost its session line');
+const declared = Number(String(sessionLine).replace(/[^\d]/g, ''));
+if (!(declared > 0)) {
+  throw new Error(`a day with spend claims ${declared} sessions: ${JSON.stringify(dayTipText)}`);
+}
+
+// The headline figures must publish the exact count for copying.
+const exactLines = nodes.filter((node) => node.props?.className === 'tbi-figureExact');
+console.log('exact-count lines:', exactLines.length, exactLines.map((node) => node.children?.[0]?.[TEXT] ?? '').join(' | '));
+if (exactLines.length < 2) throw new Error('the cumulative and today figures must both expose an exact count');
+for (const line of exactLines.slice(0, 2)) {
+  const text = String(line.children?.[0]?.[TEXT] ?? '');
+  // `exact()` prints digit groups, which is what makes the number readable and
+  // still pasteable; the check only insists it is a count, not prose.
+  if (!/^\d[\d,]*$/.test(text)) throw new Error(`an exact count is not a number: ${JSON.stringify(text)}`);
+}
+//#endregion
+
 // Nothing on this page may carry a timer: a panel left open, or sitting in the
 // background, has to cost nothing.
 if (timers.length > 0) {
