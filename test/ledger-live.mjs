@@ -148,6 +148,54 @@ console.log('fast path query-service calls:', listed);
 if (listed !== 0) throw new Error(`the fast path listed the store ${listed} time(s)`);
 //#endregion
 
+//#region 6. the memory counter may lie about the fold watermark
+// A live session's `seq` is not the same number as "the highest seq in its events".
+// A snapshot taken while the counter already ran ahead produced exactly the
+// reported bug: the ledger recorded seq 2936 as folded while the log held 2973,
+// so the last 3 million tokens were never counted and nothing complained.
+const liars = [];
+const liarCtx = {
+  get(name) {
+    if (name === 'sessions') return { list: () => liars };
+    return undefined;
+  },
+};
+// The session claims seq 999 but its events only reach 6.
+liars.push({
+  header: { id: 'L', createdAt: 1, cwd: '/probe' },
+  seq: 999,
+  snapshotEvents: () => eventsOf('L', 700),
+});
+result = await syncLedger(liarCtx, db, offsetMinutes, { skipListed: true });
+const liarTotal = result.report.sessions.find((row) => row.id === 'L')?.totals?.total ?? 0;
+console.log('session whose counter lies:', JSON.stringify({ total: liarTotal, folded: result.folded }));
+if (liarTotal !== 700) throw new Error(`an inflated seq swallowed the session: got ${liarTotal}, want 700`);
+
+// Now it gains a second turn. The counter is *still* 999 (it lies), but the events
+// really reach 12. A watermark taken from the counter would already read 999 and
+// skip this turn entirely — the exact shape of the reported 3M shortfall.
+const expanded = [
+  ...eventsOf('L', 700),
+  { type: 'turn/start', seq: 8, time: at + 1000, data: { turn: 2 } },
+  { type: 'step/start', seq: 9, time: at + 1001, data: { turn: 2, step: 1 } },
+  {
+    type: 'assistant/message', seq: 10, time: at + 1002,
+    data: {
+      turn: 2, step: 1,
+      message: { role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 300, outputTokens: 0 },
+    },
+  },
+  { type: 'step/end', seq: 11, time: at + 1003, data: { turn: 2, step: 1 } },
+  { type: 'turn/end', seq: 12, time: at + 1004, data: { turn: 2 } },
+];
+liars[0] = { header: { id: 'L', createdAt: 1, cwd: '/probe' }, seq: 999, snapshotEvents: () => expanded };
+result = await syncLedger(liarCtx, db, offsetMinutes, { skipListed: true });
+const liarTurn2 = result.report.sessions.find((row) => row.id === 'L')?.totals?.total ?? 0;
+console.log('after a lying counter gained a turn:', JSON.stringify({ total: liarTurn2, folded: result.folded }));
+if (liarTurn2 !== 1000) throw new Error(`the second turn was skipped: got ${liarTurn2}, want 1000`);
+//#endregion
+
 db.close();
 rmSync(root, { recursive: true, force: true });
 console.log('live ledger contract ok');
