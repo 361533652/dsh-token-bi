@@ -62,6 +62,37 @@ export function apply(ctx) {
   let ledger;
   let ledgerRoot;
   let ledgerFailed = false;
+  /** Whether a background store sweep is already in flight. */
+  let sweeping;
+
+  /**
+   * Fold any session the live list cannot see, behind the current response.
+   *
+   * The live list only knows sessions this process currently holds. A session
+   * that was created and finished entirely between two panel opens — resumed
+   * from another window, or written by a different process against the same
+   * store — exists only on disk, so nothing would ever fold it and its spend
+   * would be missing from the bill forever.
+   *
+   * This runs after the report has been shaped, so an open never waits on the
+   * walk, and it is single-flight so repeated opens do not stack sweeps.
+   */
+  const scheduleBackgroundSweep = (offsetMinutes) => {
+    if (sweeping !== undefined || ledgerFailed) return;
+    const timer = setTimeout(() => {
+      const root = resolveStoreRoot(ctx);
+      const db = root === undefined ? undefined : ledgerFor(root);
+      if (db === undefined) return;
+      const promise = syncLedger(ctx, db, offsetMinutes, { skipListed: false })
+        .catch(() => {})
+        .finally(() => {
+          if (sweeping === promise) sweeping = undefined;
+        });
+      sweeping = promise;
+    }, WARM_DELAY_MS);
+    // Never hold the process open just for a sweep.
+    if (typeof timer?.unref === 'function') timer.unref();
+  };
 
   const ledgerFor = (root) => {
     if (ledgerFailed) return undefined;
@@ -196,12 +227,16 @@ export function apply(ctx) {
       // - a new session is live from the instant it is created, so it arrives
       //   through `ctx.sessions.list()` — a pure in-memory read;
       // - a session that ends keeps its rows, because the bill records what was
-      //   spent and nothing ever deletes it;
-      // - so there is no reason to walk the disk ever again.
+      //   spent and nothing ever deletes it.
+      //
+      // What the live list cannot see is a session that was created and ended
+      // entirely between two reads — resumed from another window, or run by a
+      // different process against the same store. Those exist only on disk.
+      // The first open seeds them, and a periodic background sweep catches any
+      // that appeared later; the sweep runs behind the response so it never
+      // delays a panel open.
       const seed = needsSeed(db);
       const result = await syncLedger(ctx, db, offsetMinutes, { skipListed: seed !== true });
-      // One successful seed is enough forever: everything after it arrives
-      // through the live list.
       if (seed) markSeeded(db);
       const report = result.report;
       // The ledger is all-time by nature; the page slices windows locally, so
@@ -210,6 +245,11 @@ export function apply(ctx) {
       report.fromCache = false;
       report.ledger = { folded: result.folded, reused: result.reused, added: result.added };
       if (result.errors.length > 0) report.errors = result.errors;
+
+      // Catch sessions that lived entirely between two reads. This runs after
+      // the response is already shaped, so a panel open never waits for it.
+      scheduleBackgroundSweep(offsetMinutes);
+
       return report;
     } catch (error) {
       // A broken ledger must not break the panel: fall back to folding logs.

@@ -148,6 +148,42 @@ console.log('fast path query-service calls:', listed);
 if (listed !== 0) throw new Error(`the fast path listed the store ${listed} time(s)`);
 //#endregion
 
+//#region 5b. a session that lived between two reads is still found
+// The live list only knows sessions this process holds. A session created and
+// finished entirely between two panel opens exists only on disk — and it is
+// exactly the case that made the bill under-report by ~18M on a real store:
+// nothing ever folded it, so its spend never appeared.
+const ghosts = [];
+const ghostCtx = {
+  get(name) {
+    if (name === 'sessions') return { list: () => [] }; // nothing live at all
+    if (name === 'sessionQuery') {
+      return { listSessions: async () => ghosts.map((g) => ({ header: g.header, live: false, persisted: true })) };
+    }
+    return undefined;
+  },
+};
+// Nothing to observe: the fold comes from the full sweep's own path, which
+// reads through observeSession. Give it one ghost to find.
+const ghostEvents = eventsOf('G', 500).map((event, index) => ({ ...event, seq: index + 1 }));
+ghosts.push({ header: { id: 'G', createdAt: 1, cwd: '/probe' } });
+ghostCtx.get = ((original) => (name) => {
+  if (name === 'sessionQuery') {
+    return {
+      listSessions: async () => ghosts.map((g) => ({ header: g.header, live: false, persisted: true })),
+      observeSession: async () => ({ events: ghostEvents, header: ghosts[0].header, [Symbol.dispose]: () => {} }),
+    };
+  }
+  return original(name);
+})(ghostCtx.get);
+
+result = await syncLedger(ghostCtx, db, offsetMinutes, { skipListed: false });
+const ghost = result.report.sessions.find((row) => row.id === 'G');
+console.log('ghost session found:', JSON.stringify({ total: ghost?.totals?.total ?? 0, folded: result.folded }));
+if (ghost === undefined) throw new Error('a session that existed only on disk was never folded');
+if (ghost.totals.total !== 500) throw new Error(`the ghost session's spend is ${ghost.totals.total}, not 500`);
+//#endregion
+
 //#region 6. the memory counter may lie about the fold watermark
 // A live session's `seq` is not the same number as "the highest seq in its events".
 // A snapshot taken while the counter already ran ahead produced exactly the
