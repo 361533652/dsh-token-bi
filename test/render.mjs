@@ -643,6 +643,35 @@ if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked 
 const legendButtons = nodes.filter((node) => node.props?.className === 'tbi-legendItem' && typeof node.props?.onClick === 'function');
 console.log('model legend entries:', legendButtons.length);
 if (legendButtons.length < 2) throw new Error('the model legend did not render');
+
+// Hovering a slice must isolate its model: every other slice in the chart fades.
+// The slice has to be the thing under the pointer, so the hit band must sit
+// *under* the bars — drawn on top it swallows the event and hover focus never
+// fires. This asserts both the handler's existence and its effect.
+const hoverableSlice = nodes
+  .filter((node) => node.tag === 'rect' && typeof node.props?.onMouseEnter === 'function')
+  .find((node) => typeof node.props?.['data-model'] === 'string');
+if (hoverableSlice === undefined) throw new Error('no model slice accepts a pointer; the hit band is covering it');
+const hoveredModel = hoverableSlice.props['data-model'];
+hoverableSlice.props.onMouseEnter();
+const afterHover = await rerender();
+const slicesOf = (key) => afterHover.filter((node) => node.tag === 'rect' && node.props?.['data-model'] === key);
+const sameSeries = slicesOf(hoveredModel);
+const others = afterHover.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && node.props['data-model'] !== hoveredModel,
+);
+const dimmedOthers = others.filter((node) => Number(node.props?.style?.opacity ?? 1) < 0.5);
+console.log('slices of the hovered model:', sameSeries.length, '| other slices dimmed:', `${dimmedOthers.length}/${others.length}`);
+if (others.length === 0) throw new Error('the fixture has only one model, so focus cannot be observed');
+if (dimmedOthers.length === 0) throw new Error('hovering a slice did not dim the other models');
+if (dimmedOthers.length !== others.length) {
+  throw new Error(`only ${dimmedOthers.length} of ${others.length} other slices were dimmed`);
+}
+if (sameSeries.some((node) => Number(node.props?.style?.opacity ?? 1) < 0.5)) {
+  throw new Error('the hovered model was dimmed along with the others');
+}
 //#endregion
 
 //#region a selected day moves the headline numbers
