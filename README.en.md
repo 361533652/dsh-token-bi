@@ -101,7 +101,7 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
 - **By model** — split by `provider/model`, with percentages, ranked by spend. `aggregate` is Jet Hub's virtual aggregate route; the row names the real channel it is currently on (e.g. `qodercn · aggregate · 38.6%`), and its tooltip explains that it switches channels by credit expiry — history is not split by channel.
 - **By workspace** — grouped by each session's `cwd`, **every row listed** — no cap, no fold, same as the model card.
 - **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent. **Column heads sort** (session / tokens / turns / cache hit / last activity, click again to reverse), and the table **pages** ten rows at a time with a 50 / 100 switch and a footer naming the slice.
-- **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
+- **Call tree** — draws exactly the sessions the session table is showing, in the same order, so paging one pages both. Child sessions nest under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
 
 ### Cross-filtering
 

@@ -644,6 +644,58 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region the table and the call tree show one selection
+// Both cards are views of the same set: whatever the table draws, the tree
+// draws, in the same order. They used to read different arrays — the table its
+// page, the tree the whole forest — so paging moved one and not the other.
+const tableRowsNow = nodes.filter((node) => node.tag === 'tr' && node.props?.['data-clickable'] === 'true');
+const treeRowsNow = nodes.filter((node) => node.props?.className === 'tbi-treeRow');
+const tableTitles = tableRowsNow.map((node) => {
+  const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
+  return title === undefined ? '' : String(title.props?.title ?? '');
+});
+const treeTitles = treeRowsNow.map((node) => {
+  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
+  return name === undefined ? '' : String(name.props?.title ?? '');
+});
+console.log('table rows:', tableTitles.length, '| tree rows:', treeTitles.length);
+if (treeTitles.length !== tableTitles.length) {
+  throw new Error(`the table drew ${tableTitles.length} rows and the tree ${treeTitles.length}`);
+}
+if (tableTitles.join('\u0000') !== treeTitles.join('\u0000')) {
+  throw new Error('the tree lists different sessions, or in a different order, than the table');
+}
+// Turn a page: both lists must follow together, and the second page must hold
+// different sessions than the first. The page size is reset to ten first — an
+// earlier check raised it to a hundred, which would fit the whole fixture on
+// one page and make this assertion vacuous.
+const sizePicker = nodes.find((node) => node.props?.className === 'tbi-pagerSize');
+if (sizePicker !== undefined) { sizePicker.props.onChange({ target: { value: '10' } }); await rerender(); }
+const firstPage = await rerender();
+const nextBtn = firstPage.filter((node) => node.props?.className === 'tbi-pagerBtn').at(-1);
+if (nextBtn === undefined) throw new Error('the fixture fits on one page, so paging cannot be checked');
+nextBtn.props.onClick();
+const paged = await rerender();
+const pagedTable = paged.filter((node) => node.tag === 'tr' && node.props?.['data-clickable'] === 'true').map((node) => {
+  const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
+  return title === undefined ? '' : String(title.props?.title ?? '');
+});
+const pagedTree = paged.filter((node) => node.props?.className === 'tbi-treeRow').map((node) => {
+  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
+  return name === undefined ? '' : String(name.props?.title ?? '');
+});
+console.log('page 2 — table rows:', pagedTable.length, '| tree rows:', pagedTree.length);
+if (pagedTable.join('\u0000') !== pagedTree.join('\u0000')) {
+  throw new Error('the tree did not follow the table to the next page');
+}
+if (pagedTable.join('\u0000') === tableTitles.join('\u0000')) {
+  throw new Error('paging did not change which sessions are drawn');
+}
+// Back to page one so the rest of the walk sees the first page.
+const backBtn = paged.filter((node) => node.props?.className === 'tbi-pagerBtn')[0];
+if (backBtn !== undefined) { backBtn.props.onClick(); await rerender(); }
+//#endregion
+
 
 //#region the chart stacks by model, and clicking a legend name isolates one
 // Stacking by cost bucket answered "what kind of spend"; the question a bill
