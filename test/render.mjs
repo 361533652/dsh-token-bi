@@ -598,6 +598,30 @@ if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }
 
+// The workspace card lists every workspace in the drawn window, exactly like the
+// model card does. It used to stop at eight and fold the rest into a one-line
+// note, which hid real spend behind a number the reader could not act on.
+const cwdList = nodes.filter((node) => node.props?.className === 'tbi-cwdList');
+console.log('workspace list containers:', cwdList.length);
+if (cwdList.length !== 1) throw new Error(`expected one workspace list, found ${cwdList.length}`);
+const cwdRows = collectAll(cwdList[0].children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
+// The card draws the window, not the whole store, so compare against the
+// workspaces that actually have spend inside the 30-day preset.
+const drawnDays = new Set(dailyColumns.map((node) => node.children?.[0]?.props?.key ?? node.props?.key).filter(Boolean));
+const windowDays = drawnDays.size > 0
+  ? drawnDays
+  : new Set(report.days.slice(-DEFAULT_RANGE_DAYS).map((day) => day.day));
+const cwdsInWindow = new Set(
+  report.cells.filter((cell) => windowDays.has(cell.day)).map((cell) => cell.cwd),
+);
+console.log('workspace rows:', cwdRows.length, '| distinct in window:', cwdsInWindow.size);
+if (cwdsInWindow.size > 8 && cwdRows.length <= 8) {
+  throw new Error(`the workspace card still caps at 8 rows (${cwdsInWindow.size} workspaces in the window)`);
+}
+if (cwdRows.length !== cwdsInWindow.size) {
+  throw new Error(`the workspace card drew ${cwdRows.length} rows for ${cwdsInWindow.size} workspaces in the window`);
+}
+
 //#region window switching is local
 // The whole point of holding one all-time report: switching preset must be a
 // local slice, never a request. Click each preset and assert nothing goes out.
