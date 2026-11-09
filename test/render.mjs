@@ -454,6 +454,41 @@ const clickBubblingTo = (target, ancestor) => {
 };
 
 
+// The session table now pages ten rows at a time, so a check that walks every
+// row has to ask for the largest page first. Setting it through the control is
+// also the only way to prove the control itself works.
+const pageSizeSelect = nodes.find((node) => node.props?.className === 'tbi-pagerSize');
+if (pageSizeSelect !== undefined) {
+  console.log('pager sizes:', JSON.stringify((pageSizeSelect.children ?? []).map((child) => child?.props?.value)));
+  pageSizeSelect.props.onChange({ target: { value: '100' } });
+} else {
+  console.log('pager hidden: the fixture fits on one page');
+}
+
+/**
+ * Every row across every page.
+ *
+ * The table is paged, so walking the visible rows only ever sees one page. This
+ * clicks through the pager and unions the ids, which is also the check that
+ * paging reaches the last row.
+ */
+const allRowsAcrossPages = async () => {
+  const seen = new Map();
+  for (let guard = 0; guard < 60; guard += 1) {
+    const nodesNow = await rerender();
+    for (const node of nodesNow) {
+      if (node.tag === 'tr' && node.props?.['data-clickable'] === 'true') {
+        seen.set(node.props.id, node);
+      }
+    }
+    const pager = nodesNow.filter((node) => node.props?.className === 'tbi-pagerBtn');
+    const next = pager[pager.length - 1];
+    if (next === undefined || next.props.disabled === true) break;
+    next.props.onClick();
+  }
+  return seen;
+};
+
 let foldNodes = await rerender();
 const headlineBefore = foldNodes.filter((node) => node.props?.className === 'tbi-figure').map((node) => JSON.stringify(node.children?.[0]?.[TEXT] ?? '')).join(',');
 
@@ -462,8 +497,8 @@ console.log('child row folded by default:', rowById(foldNodes, 'fold-child') ===
 if (rowById(foldNodes, 'fold-child') !== undefined) {
   throw new Error('a subagent row is drawn by default; folding is not on');
 }
-const parentRow = rowById(foldNodes, 'fold-parent');
-if (parentRow === undefined) throw new Error('the parent session row is missing');
+const parentRow = (await allRowsAcrossPages()).get('session-fold-parent');
+if (parentRow === undefined) throw new Error('the parent session row is missing from every page');
 
 // The fold control has to exist on the parent and carry the child count, so a
 // folded branch is visible as a branch rather than as a session with no
@@ -486,7 +521,10 @@ if (parentFoldButton.props['aria-label'] !== `1 ${zh.subagent}`) {
   throw new Error(`the fold control is unlabelled for screen readers: ${parentFoldButton.props['aria-label']}`);
 }
 
-const detailsBefore = detailRowCount(foldNodes);
+// Unfolding a branch must not also open the parent's turn timeline: the row and
+// the fold control are separate targets. Counted on the page that holds the
+// parent, since paging means "the table" is no longer a single screenful.
+const detailsBefore = detailRowCount(await rerender());
 const foldEvent = clickBubblingTo(parentFoldButton, parentRow);
 console.log('fold control swallowed the click:', foldEvent.stopped);
 foldNodes = await rerender();
@@ -594,6 +632,46 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+
+//#region the chart stacks by model, and clicking a legend name isolates one
+// Stacking by cost bucket answered "what kind of spend"; the question a bill
+// raises is "whose spend". Assert the column is split by model: a busy day must
+// carry more than one coloured slice when the data has more than one model.
+const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.fill === 'string' && node.props.fill.includes('color-mix'));
+console.log('model-coloured slices:', stackedSlices.length);
+if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked by model');
+const legendButtons = nodes.filter((node) => node.props?.className === 'tbi-legendItem' && typeof node.props?.onClick === 'function');
+console.log('model legend entries:', legendButtons.length);
+if (legendButtons.length < 2) throw new Error('the model legend did not render');
+//#endregion
+
+//#region a selected day moves the headline numbers
+// Clicking a day used to leave the cards frozen on the whole window, which read
+// as "my click did nothing at all". The cumulative figure must shrink to a day.
+const figuresOf = (list) => list.filter((node) => node.props?.className === 'tbi-figure');
+const totalBefore = figuresOf(nodes)[0];
+const textOf = (node) => (node.children ?? []).map((child) => child?.[TEXT] ?? child?.children?.[0]?.[TEXT] ?? '').join('');
+// Pick a column that has spend: the leftmost days of a window are often quiet,
+// and selecting one of those would legitimately zero the headline.
+const busyColumn = nodes
+  .filter((node) => node.props?.className === 'tbi-col')
+  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && String(child.props?.fill ?? '').includes('color-mix')));
+if (busyColumn === undefined) throw new Error('no day column with spend to click');
+busyColumn.props.onClick();
+const afterSelect = await rerender();
+const totalAfter = figuresOf(afterSelect)[0];
+console.log('headline before select:', JSON.stringify(textOf(totalBefore)));
+console.log('headline after select :', JSON.stringify(textOf(totalAfter)));
+if (textOf(totalBefore) === textOf(totalAfter)) {
+  throw new Error('selecting a day left the headline figures unchanged');
+}
+console.log('selected label is the day', zh.dayTokens === undefined ? '' : `(${zh.dayTokens})`);
+// Clear the selection so the rest of the walk sees the full table.
+const clearTag = afterSelect.find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearTag !== undefined) clearTag.props.onClick();
+await rerender();
+//#endregion
+
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
 }
@@ -701,30 +779,40 @@ if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
 // has spend but claims zero sessions is a lie the tooltip told on every hover.
 const dayTips = nodes.filter((node) => node.props?.className === 'tbi-col');
 if (dayTips.length === 0) throw new Error('no day columns to hover');
-const firstBusy = dayTips.find((node) => {
-  const rect = (node.children ?? []).find((child) => child?.tag === 'rect');
-  return rect !== undefined && Number(rect.props?.height) > 10;
-});
-if (firstBusy === undefined) throw new Error('no busy day column to inspect');
-const tipLines = String(firstBusy.props.onMouseEnter ?? '').length > 0 ? 'has handler' : 'no handler';
-console.log('busy day column:', tipLines);
-
-// Hover a busy day and read the session count off the tooltip. The window slice
-// used to drop that field, so every day claimed "0 sessions" even on days with
-// real spend.
-firstBusy.props.onMouseEnter();
+// Pick a day that actually has spend. After the stacked-by-model change the
+// first rect in a column is the hover shadow or the hit band, so "tallest rect"
+// no longer identifies a busy day — ask the tooltip instead.
+const tipOf = (node) => {
+  node.props.onMouseEnter();
+  let text = '';
+  for (let pass = 0; pass < 4; pass += 1) {
+    dirty = false;
+    effects = [];
+    frameIndex = 0;
+    tree = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    const hovered = walkCurrent();
+    const tip = hovered.find((entry) => entry.props?.className === 'tbi-tooltip');
+    text = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+    if (text.length > 0 && !dirty) break;
+  }
+  return text;
+};
+let firstBusy;
 let dayTipText = '';
-for (let pass = 0; pass < 6; pass += 1) {
-  dirty = false;
-  effects = [];
-  frameIndex = 0;
-  tree = renderNode(React.createElement(page.component, { t }));
-  for (const effect of effects) effect();
-  const hoverNodes = walkCurrent();
-  const tip = hoverNodes.find((node) => node.props?.className === 'tbi-tooltip');
-  dayTipText = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
-  if (dayTipText.length > 0 && !dirty) break;
+for (const column of dayTips) {
+  const text = tipOf(column);
+  if (text.includes(zh.sessionsUnit) && !text.includes(zh.noSpend)) {
+    const line = text.split('\n').find((entry) => entry.includes(zh.sessionsUnit));
+    if (Number(String(line).replace(/[^\d]/g, '')) > 0) {
+      firstBusy = column;
+      dayTipText = text;
+      break;
+    }
+  }
 }
+if (firstBusy === undefined) throw new Error('no day column with real spend to inspect');
+console.log('busy day column:', 'has handler');
 console.log('day tooltip:', JSON.stringify(dayTipText));
 const sessionLine = dayTipText.split('\n').find((line) => line.includes(zh.sessionsUnit));
 console.log('session line:', JSON.stringify(sessionLine ?? ''));
