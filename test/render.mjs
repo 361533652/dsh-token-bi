@@ -915,18 +915,22 @@ for (const card of rollCards) {
   if (rowsIn <= 10 && folds === true) {
     throw new Error(`a ${rowsIn}-row list rolls up with nothing to hide`);
   }
-  if (folds === true) {
-    // Hovering opens it; leaving closes it again.
-    if (typeof card.props.onMouseEnter !== 'function') {
-      throw new Error('a rolling list cannot be opened: it has no hover handler');
-    }
-    const handler = card.props.onMouseEnter;
-    if (open === true) throw new Error('a rolling list started open');
+  if (folds === true && open === true) {
+    throw new Error('a rolling list started open');
   }
 }
-// Hover opens, leaving closes.
+// Only the roller opens the list: crossing the card on the way somewhere else
+// must not spring it open.
 const firstRoll = rollCards[0];
-firstRoll.props.onMouseEnter();
+if (firstRoll.props.onMouseEnter !== undefined) {
+  throw new Error('the card itself still opens on hover; only the roller should');
+}
+const rollerOf = (card) => collectAll(card.children ?? []).find(
+  (node) => node.props?.className === 'tbi-rollHandle',
+);
+const firstRoller = rollerOf(firstRoll);
+if (firstRoller === undefined) throw new Error('the rolling card has no roller to hover');
+firstRoller.props.onMouseEnter();
 const opened = await rerender();
 const openedRoll = opened.find((node) => node.props?.className === 'tbi-roll');
 console.log('after hover:', JSON.stringify({ open: openedRoll?.props['data-open'] }));
@@ -1110,9 +1114,9 @@ if (restText.length === 0) {
 if (!restText.includes(zh.sessionsUnit)) {
   throw new Error(`the card that opened is not the day card: ${JSON.stringify(restText.slice(0, 60))}`);
 }
-// The arrow in the open card marks the slice under the pointer. Moving up and
-// down inside one column must move it: the card's text is rebuilt from live
-// state, not frozen when the timer fired.
+//#region the day card lists every model of that day
+// A busy day can carry a dozen models. The card used to stop at six, so it
+// quietly disagreed with the stack it was describing.
 const openCard = () => {
   const frame = (() => {
     dirty = false;
@@ -1127,6 +1131,21 @@ const openCard = () => {
   );
   return tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
 };
+const openTipNow = openCard();
+const listedModels = openTipNow.split('\n').filter((line) => /^[\u25b8 ]/.test(line) && /\d/.test(line));
+const expectModels = collectAll(dwellColumn.children ?? [])
+  .filter((node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string')
+  .map((node) => node.props['data-model']);
+const distinctExpect = [...new Set(expectModels)];
+console.log('models in the open day:', distinctExpect.length, '| lines in the card:', listedModels.length);
+if (distinctExpect.length > 1 && listedModels.length !== distinctExpect.length) {
+  throw new Error(`the card lists ${listedModels.length} models but the column drew ${distinctExpect.length}`);
+}
+//#endregion
+
+// The arrow in the open card marks the slice under the pointer. Moving up and
+// down inside one column must move it: the card's text is rebuilt from live
+// state, not frozen when the timer fired.
 const arrowOf = (text) => {
   const line = text.split('\n').find((entry) => entry.startsWith('\u25b8 '));
   return line === undefined ? null : line.slice(2).split(' ')[0];
