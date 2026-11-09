@@ -107,6 +107,12 @@ let registration;
  * left open, or sitting in the background, has to stay quiet.
  */
 const timers = [];
+const dwellTimers = [];
+// Shorten the tooltip's dwell window: the test still exercises the timer, it
+// just does not wait a full second per column.
+// Long enough that a single render pass cannot outwait it (each pass sleeps
+// ~40 ms), short enough that the suite stays fast.
+globalThis.__tbiDwellMs = 200;
 const requests = [];
 const listeners = [];
 /** Stand-in for the browser's localStorage, so the paint cache is exercised. */
@@ -127,6 +133,12 @@ const window = {
     return timers.length;
   },
   clearInterval: () => {},
+  // The column tooltip waits for the pointer to rest before showing, so the page
+  // needs a real timer. It is deliberately *not* pushed into `timers`: that list
+  // exists to prove no passive polling is running, and a dwell timer is an
+  // interaction, not a poll.
+  setTimeout: (fn, ms) => { dwellTimers.push(ms); return setTimeout(fn, ms); },
+  clearTimeout: (handle) => clearTimeout(handle),
   // The panel subscribes to focus so a background window catches up as soon as
   // it is brought forward; the stub only has to accept and remember it.
   addEventListener: (type) => {
@@ -454,6 +466,41 @@ const clickBubblingTo = (target, ancestor) => {
 };
 
 
+// The session table now pages ten rows at a time, so a check that walks every
+// row has to ask for the largest page first. Setting it through the control is
+// also the only way to prove the control itself works.
+const pageSizeSelect = nodes.find((node) => node.props?.className === 'tbi-pagerSize');
+if (pageSizeSelect !== undefined) {
+  console.log('pager sizes:', JSON.stringify((pageSizeSelect.children ?? []).map((child) => child?.props?.value)));
+  pageSizeSelect.props.onChange({ target: { value: '100' } });
+} else {
+  console.log('pager hidden: the fixture fits on one page');
+}
+
+/**
+ * Every row across every page.
+ *
+ * The table is paged, so walking the visible rows only ever sees one page. This
+ * clicks through the pager and unions the ids, which is also the check that
+ * paging reaches the last row.
+ */
+const allRowsAcrossPages = async () => {
+  const seen = new Map();
+  for (let guard = 0; guard < 60; guard += 1) {
+    const nodesNow = await rerender();
+    for (const node of nodesNow) {
+      if (node.tag === 'tr' && node.props?.['data-clickable'] === 'true') {
+        seen.set(node.props.id, node);
+      }
+    }
+    const pager = nodesNow.filter((node) => node.props?.className === 'tbi-pagerBtn');
+    const next = pager[pager.length - 1];
+    if (next === undefined || next.props.disabled === true) break;
+    next.props.onClick();
+  }
+  return seen;
+};
+
 let foldNodes = await rerender();
 const headlineBefore = foldNodes.filter((node) => node.props?.className === 'tbi-figure').map((node) => JSON.stringify(node.children?.[0]?.[TEXT] ?? '')).join(',');
 
@@ -462,8 +509,8 @@ console.log('child row folded by default:', rowById(foldNodes, 'fold-child') ===
 if (rowById(foldNodes, 'fold-child') !== undefined) {
   throw new Error('a subagent row is drawn by default; folding is not on');
 }
-const parentRow = rowById(foldNodes, 'fold-parent');
-if (parentRow === undefined) throw new Error('the parent session row is missing');
+const parentRow = (await allRowsAcrossPages()).get('session-fold-parent');
+if (parentRow === undefined) throw new Error('the parent session row is missing from every page');
 
 // The fold control has to exist on the parent and carry the child count, so a
 // folded branch is visible as a branch rather than as a session with no
@@ -486,7 +533,10 @@ if (parentFoldButton.props['aria-label'] !== `1 ${zh.subagent}`) {
   throw new Error(`the fold control is unlabelled for screen readers: ${parentFoldButton.props['aria-label']}`);
 }
 
-const detailsBefore = detailRowCount(foldNodes);
+// Unfolding a branch must not also open the parent's turn timeline: the row and
+// the fold control are separate targets. Counted on the page that holds the
+// parent, since paging means "the table" is no longer a single screenful.
+const detailsBefore = detailRowCount(await rerender());
 const foldEvent = clickBubblingTo(parentFoldButton, parentRow);
 console.log('fold control swallowed the click:', foldEvent.stopped);
 foldNodes = await rerender();
@@ -594,8 +644,264 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region the inner scrollers hand the wheel back to the page
+// With the pointer over the session table the page used to stop dead, even when
+// the table had nothing to scroll. The rule: the list keeps the gesture while it
+// has somewhere to go, and the page takes it otherwise.
+const wh = moduleExports.wheelIntent;
+if (typeof wh !== 'function') throw new Error('wheelIntent is not exported');
+const tall = { scrollTop: 100, clientHeight: 200, scrollHeight: 900 };
+const atTop = { scrollTop: 0, clientHeight: 200, scrollHeight: 900 };
+const atEnd = { scrollTop: 700, clientHeight: 200, scrollHeight: 900 };
+const short = { scrollTop: 0, clientHeight: 200, scrollHeight: 200 };
+const wheelCases = [
+  ['mid-list down', { deltaY: 40, deltaX: 0 }, tall, 'list'],
+  ['mid-list up', { deltaY: -40, deltaX: 0 }, tall, 'list'],
+  ['top, still going up', { deltaY: -40, deltaX: 0 }, atTop, 'page'],
+  ['end, still going down', { deltaY: 40, deltaX: 0 }, atEnd, 'page'],
+  ['nothing to scroll', { deltaY: 40, deltaX: 0 }, short, 'page'],
+  ['horizontal', { deltaY: 0, deltaX: 90 }, tall, 'list'],
+];
+for (const [name, wheelEvent, box, want] of wheelCases) {
+  const got = wh(wheelEvent, box);
+  console.log(`wheel ${name}: ${got}`);
+  if (got !== want) throw new Error(`wheel ${name} gave ${got}, expected ${want}`);
+}
+//#endregion
+
+//#region the table and the call tree show one selection
+// Both cards are views of the same set: whatever the table draws, the tree
+// draws, in the same order. They used to read different arrays — the table its
+// page, the tree the whole forest — so paging moved one and not the other.
+const tableRowsNow = nodes.filter((node) => node.tag === 'tr' && node.props?.['data-clickable'] === 'true');
+const treeRowsNow = nodes.filter((node) => node.props?.className === 'tbi-treeRow');
+const tableTitles = tableRowsNow.map((node) => {
+  const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
+  return title === undefined ? '' : String(title.props?.title ?? '');
+});
+const treeTitles = treeRowsNow.map((node) => {
+  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
+  return name === undefined ? '' : String(name.props?.title ?? '');
+});
+console.log('table rows:', tableTitles.length, '| tree rows:', treeTitles.length);
+if (treeTitles.length !== tableTitles.length) {
+  throw new Error(`the table drew ${tableTitles.length} rows and the tree ${treeTitles.length}`);
+}
+if (tableTitles.join('\u0000') !== treeTitles.join('\u0000')) {
+  throw new Error('the tree lists different sessions, or in a different order, than the table');
+}
+// Turn a page: both lists must follow together, and the second page must hold
+// different sessions than the first. The page size is reset to ten first — an
+// earlier check raised it to a hundred, which would fit the whole fixture on
+// one page and make this assertion vacuous.
+const sizePicker = nodes.find((node) => node.props?.className === 'tbi-pagerSize');
+if (sizePicker !== undefined) { sizePicker.props.onChange({ target: { value: '10' } }); await rerender(); }
+const firstPage = await rerender();
+const nextBtn = firstPage.filter((node) => node.props?.className === 'tbi-pagerBtn').at(-1);
+if (nextBtn === undefined) throw new Error('the fixture fits on one page, so paging cannot be checked');
+nextBtn.props.onClick();
+const paged = await rerender();
+const pagedTable = paged.filter((node) => node.tag === 'tr' && node.props?.['data-clickable'] === 'true').map((node) => {
+  const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
+  return title === undefined ? '' : String(title.props?.title ?? '');
+});
+const pagedTree = paged.filter((node) => node.props?.className === 'tbi-treeRow').map((node) => {
+  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
+  return name === undefined ? '' : String(name.props?.title ?? '');
+});
+console.log('page 2 — table rows:', pagedTable.length, '| tree rows:', pagedTree.length);
+if (pagedTable.join('\u0000') !== pagedTree.join('\u0000')) {
+  throw new Error('the tree did not follow the table to the next page');
+}
+if (pagedTable.join('\u0000') === tableTitles.join('\u0000')) {
+  throw new Error('paging did not change which sessions are drawn');
+}
+// Back to page one so the rest of the walk sees the first page.
+const backBtn = paged.filter((node) => node.props?.className === 'tbi-pagerBtn')[0];
+if (backBtn !== undefined) { backBtn.props.onClick(); await rerender(); }
+//#endregion
+
+
+//#region the chart stacks by model, and clicking a legend name isolates one
+// Stacking by cost bucket answered "what kind of spend"; the question a bill
+// raises is "whose spend". Assert the column is split by model: a busy day must
+// carry more than one coloured slice when the data has more than one model.
+const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.fill === 'string' && node.props.fill.includes('color-mix'));
+console.log('model-coloured slices:', stackedSlices.length);
+if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked by model');
+// The legend is swatches only now: names would push a dozen models onto three
+// lines. Identity arrives on hover, so each swatch must carry its label for
+// both the pointer and assistive tech.
+const legendButtons = nodes.filter((node) => node.props?.className === 'tbi-swatchBtn');
+console.log('model legend swatches:', legendButtons.length);
+if (legendButtons.length < 2) throw new Error('the model legend did not render');
+const labelled = legendButtons.filter((node) => String(node.props?.['aria-label'] ?? '').includes('/'));
+if (labelled.length !== legendButtons.length) {
+  throw new Error(`only ${labelled.length} of ${legendButtons.length} swatches name their model`);
+}
+const hoverable = legendButtons.filter((node) => typeof node.props?.onMouseEnter === 'function');
+if (hoverable.length !== legendButtons.length) {
+  throw new Error('a swatch cannot be identified: it has no hover handler');
+}
+
+// Hovering a slice must isolate its model: every other slice in the chart fades.
+// The slice has to be the thing under the pointer, so the hit band must sit
+// *under* the bars — drawn on top it swallows the event and hover focus never
+// fires. This asserts both the handler's existence and its effect.
+const hoverableSlice = nodes
+  .filter((node) => node.tag === 'rect' && typeof node.props?.onMouseEnter === 'function')
+  .find((node) => typeof node.props?.['data-model'] === 'string');
+if (hoverableSlice === undefined) throw new Error('no model slice accepts a pointer; the hit band is covering it');
+const hoveredModel = hoverableSlice.props['data-model'];
+hoverableSlice.props.onMouseEnter();
+const afterHover = await rerender();
+const slicesOf = (key) => afterHover.filter((node) => node.tag === 'rect' && node.props?.['data-model'] === key);
+const sameSeries = slicesOf(hoveredModel);
+const others = afterHover.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && node.props['data-model'] !== hoveredModel,
+);
+const dimmedOthers = others.filter((node) => Number(node.props?.style?.opacity ?? 1) < 0.5);
+console.log('slices of the hovered model:', sameSeries.length, '| other slices dimmed:', `${dimmedOthers.length}/${others.length}`);
+if (others.length === 0) throw new Error('the fixture has only one model, so focus cannot be observed');
+if (dimmedOthers.length === 0) throw new Error('hovering a slice did not dim the other models');
+if (dimmedOthers.length !== others.length) {
+  throw new Error(`only ${dimmedOthers.length} of ${others.length} other slices were dimmed`);
+}
+if (sameSeries.some((node) => Number(node.props?.style?.opacity ?? 1) < 0.5)) {
+  throw new Error('the hovered model was dimmed along with the others');
+}
+
+//#region the model card and the chart share one focus
+// Clicking a row in the model card is a real filter, and the stacked chart has
+// to follow it: the row the reader just picked is the series they are looking
+// at, so the other slices must dim exactly as they do on hover. The two used to
+// keep separate state and drift apart.
+const modelRow = nodes.find((node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function');
+if (modelRow === undefined) throw new Error('the model card rendered no clickable rows');
+const figBeforeFilter = (() => {
+  const fig = nodes.find((n) => n.props?.className === 'tbi-figure');
+  return (fig?.children ?? []).map((c) => c?.[TEXT] ?? (c?.children ?? []).map((g) => g?.[TEXT] ?? '').join('')).join('');
+})();
+modelRow.props.onClick();
+const afterFilter = await rerender();
+const focusedAfter = afterFilter.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && Number(node.props?.style?.opacity ?? 1) >= 0.5,
+);
+const dimAfter = afterFilter.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && Number(node.props?.style?.opacity ?? 1) < 0.5,
+);
+console.log('after filtering by a model card row: kept', focusedAfter.length, 'dimmed', dimAfter.length);
+if (focusedAfter.length === 0) throw new Error('the chart shows no series after filtering, so nothing is focused');
+// A filter narrows the data, so the only slices left are the selected model's;
+// there may be nothing to dim. What must hold is that the chart did not error
+// out and still renders slices for the chosen model.
+const chosen = focusedAfter[0]?.props?.['data-model'];
+if (chosen === undefined) throw new Error('the chart lost its series identity after filtering');
+console.log('chart focused on:', chosen);
+// The filter must also narrow the headline, or the chart and the cards would
+// be describing two different things.
+const figNow = afterFilter.find((n) => n.props?.className === 'tbi-figure');
+const headlineNow = (figNow?.children ?? []).map((c) => c?.[TEXT] ?? (c?.children ?? []).map((g) => g?.[TEXT] ?? '').join('')).join('');
+console.log('headline while filtered:', JSON.stringify(headlineNow));
+// The headline must narrow with the model filter. Its `totals` memo used to
+// omit `facets` from its dependency list, so the cards stayed on the all-model
+// figures while every chart below had already narrowed to one model.
+const headlineUnfiltered = figBeforeFilter === undefined ? '' : figBeforeFilter;
+if (headlineNow === headlineUnfiltered) {
+  throw new Error(`the headline ignored the model filter: ${headlineNow}`);
+}
+// The link has to work the other way too: pinning a model in the chart's
+// legend must light up that model's row in the model card. Before this the
+// two lists kept their own idea of "focused" and only one direction worked.
+// Clear any model filter left by the earlier checks: a lingering selection
+// would light a row for the wrong reason and make this check vacuous.
+const clearModelTag = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearModelTag !== undefined) { clearModelTag.props.onClick(); await rerender(); }
+const beforePin = (await rerender()).filter((node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true);
+if (beforePin.length !== 0) throw new Error('a row is lit before any pin, so this check cannot tell what lit it');
+const swatch = nodes.find((node) => node.props?.className === 'tbi-swatchBtn');
+if (swatch === undefined) throw new Error('no legend swatch to pin');
+const pinnedKey = swatch.props['aria-label'];
+swatch.props.onClick();
+const afterPin = await rerender();
+const litRows = afterPin.filter((node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true);
+console.log('rows lit by the legend pin:', litRows.length, 'expected model:', pinnedKey);
+if (litRows.length === 0) throw new Error('pinning a legend swatch did not light the model card row');
+//#endregion
+//#endregion
+
+//#region a selected day moves the headline numbers
+// Clicking a day used to leave the cards frozen on the whole window, which read
+// as "my click did nothing at all". The cumulative figure must shrink to a day.
+const figuresOf = (list) => list.filter((node) => node.props?.className === 'tbi-figure');
+const totalBefore = figuresOf(nodes)[0];
+const textOf = (node) => (node.children ?? []).map((child) => child?.[TEXT] ?? child?.children?.[0]?.[TEXT] ?? '').join('');
+// Pick a column that has spend: the leftmost days of a window are often quiet,
+// and selecting one of those would legitimately zero the headline.
+const busyColumn = nodes
+  .filter((node) => node.props?.className === 'tbi-col')
+  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && String(child.props?.fill ?? '').includes('color-mix')));
+if (busyColumn === undefined) throw new Error('no day column with spend to click');
+busyColumn.props.onClick();
+const afterSelect = await rerender();
+const totalAfter = figuresOf(afterSelect)[0];
+console.log('headline before select:', JSON.stringify(textOf(totalBefore)));
+console.log('headline after select :', JSON.stringify(textOf(totalAfter)));
+if (textOf(totalBefore) === textOf(totalAfter)) {
+  throw new Error('selecting a day left the headline figures unchanged');
+}
+console.log('selected label is the day', zh.dayTokens === undefined ? '' : `(${zh.dayTokens})`);
+// Clear the selection so the rest of the walk sees the full table.
+const clearTag = afterSelect.find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearTag !== undefined) clearTag.props.onClick();
+await rerender();
+//#endregion
+
 if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
   throw new Error('heatmap card did not render');
+}
+
+// The workspace card lists every workspace in the drawn window, exactly like the
+// model card does. It used to stop at eight and fold the rest into a one-line
+// note, which hid real spend behind a number the reader could not act on.
+// Both cards roll up behind the same component, so find them by that class and
+// take the one holding workspace rows.
+const rollCards = nodes.filter((node) => node.props?.className === 'tbi-roll');
+console.log('scroll cards:', rollCards.length);
+if (rollCards.length !== 2) throw new Error(`expected two rolling lists, found ${rollCards.length}`);
+// Workspace rows are the ones whose tooltip names a path; model rows never do.
+// A workspace row renders its last two path segments, so it always contains a
+// separator; a model row never does.
+const looksLikePath = (node) => collectAll(node.children ?? []).some((leaf) => {
+  const value = leaf?.[TEXT];
+  return typeof value === 'string' && (value.includes('/') || value.includes('\\'));
+});
+const cwdList = rollCards.find((node) => collectAll(node.children ?? []).some(
+  (child) => child.props?.className === 'tbi-barRow' && looksLikePath(child),
+));
+if (cwdList === undefined) throw new Error('neither rolling list holds workspace rows');
+const cwdRows = collectAll(cwdList.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
+// The card draws the window, not the whole store, so compare against the
+// workspaces that actually have spend inside the 30-day preset.
+const drawnDays = new Set(dailyColumns.map((node) => node.children?.[0]?.props?.key ?? node.props?.key).filter(Boolean));
+const windowDays = drawnDays.size > 0
+  ? drawnDays
+  : new Set(report.days.slice(-DEFAULT_RANGE_DAYS).map((day) => day.day));
+const cwdsInWindow = new Set(
+  report.cells.filter((cell) => windowDays.has(cell.day)).map((cell) => cell.cwd),
+);
+console.log('workspace rows:', cwdRows.length, '| distinct in window:', cwdsInWindow.size);
+if (cwdsInWindow.size > 8 && cwdRows.length <= 8) {
+  throw new Error(`the workspace card still caps at 8 rows (${cwdsInWindow.size} workspaces in the window)`);
+}
+if (cwdRows.length !== cwdsInWindow.size) {
+  throw new Error(`the workspace card drew ${cwdRows.length} rows for ${cwdsInWindow.size} workspaces in the window`);
 }
 
 //#region window switching is local
@@ -671,36 +977,176 @@ if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
   throw new Error('bar tooltip omits the token count');
 }
 
+//#region the model and workspace cards roll up
+// Both lists sit at ten rows and unroll under the pointer. The height animates
+// to a measured value, so a longer list unrolls further and the cards below are
+// pushed down smoothly rather than jumped.
+for (const card of rollCards) {
+  const folds = card.props['data-folds'];
+  const open = card.props['data-open'];
+  const rowsIn = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow').length;
+  console.log('rolling card:', JSON.stringify({ rows: rowsIn, folds, open }));
+  if (rowsIn > 10 && folds !== true) {
+    throw new Error(`a ${rowsIn}-row list does not roll up`);
+  }
+  if (rowsIn <= 10 && folds === true) {
+    throw new Error(`a ${rowsIn}-row list rolls up with nothing to hide`);
+  }
+  if (folds === true && open === true) {
+    throw new Error('a rolling list started open');
+  }
+}
+// Only the roller opens the list: crossing the card on the way somewhere else
+// must not spring it open.
+const firstRoll = rollCards[0];
+if (firstRoll.props.onMouseEnter !== undefined) {
+  throw new Error('the card itself still opens on hover; only the roller should');
+}
+const rollerOf = (card) => collectAll(card.children ?? []).find(
+  (node) => node.props?.className === 'tbi-rollHandle',
+);
+const firstRoller = rollerOf(firstRoll);
+if (firstRoller === undefined) throw new Error('the rolling card has no roller to hover');
+firstRoller.props.onMouseEnter();
+const opened = await rerender();
+const openedRoll = opened.find((node) => node.props?.className === 'tbi-roll');
+console.log('after hover:', JSON.stringify({ open: openedRoll?.props['data-open'] }));
+if (openedRoll?.props['data-open'] !== true) {
+  throw new Error('hovering a rolling list did not open it');
+}
+openedRoll.props.onMouseLeave();
+const closed = await rerender();
+const closedRoll = closed.find((node) => node.props?.className === 'tbi-roll');
+if (closedRoll?.props['data-open'] !== false) {
+  throw new Error('leaving a rolling list did not fold it back');
+}
+// A selected row pins the list open: folding away the row the user just clicked
+// would hide what they are reading.
+const modelRoll = closed.find((node) => node.props?.className === 'tbi-roll');
+const modelRowToPin = collectAll(modelRoll?.children ?? []).find(
+  (node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function',
+);
+if (modelRowToPin === undefined) throw new Error('no model row to select');
+modelRowToPin.props.onClick();
+const pinnedFrame = await rerender();
+const pinnedRoll = pinnedFrame.find((node) => node.props?.className === 'tbi-roll');
+console.log('after selecting a model row:', JSON.stringify({
+  open: pinnedRoll?.props['data-open'],
+  pinned: pinnedRoll?.props['data-pinned'],
+}));
+// The row picked here sits inside the visible window, so it must NOT pin:
+// pinning on it would unroll the card for a click the user never made.
+if (pinnedRoll?.props['data-open'] !== false) {
+  throw new Error('selecting a row inside the visible window unrolled the card');
+}
+if (pinnedRoll?.props['data-pinned'] !== false) {
+  throw new Error('a visible row reported itself as pinning the list');
+}
+// Now pick a row that lives below the fold: that one *must* pin, because
+// folding it away would hide the row the user just chose.
+const deepRow = collectAll(modelRoll?.children ?? [])
+  .filter((node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function')
+  .at(11);
+if (deepRow === undefined) throw new Error('the fixture has no row below the fold');
+deepRow.props.onClick();
+const deepFrame = await rerender();
+const deepRoll = deepFrame.find((node) => node.props?.className === 'tbi-roll');
+console.log('after selecting a row below the fold:', JSON.stringify({
+  open: deepRoll?.props['data-open'],
+  pinned: deepRoll?.props['data-pinned'],
+}));
+if (deepRoll?.props['data-open'] !== true || deepRoll?.props['data-pinned'] !== true) {
+  throw new Error('selecting a row below the fold did not pin the list open');
+}
+deepRoll.props.onMouseLeave?.();
+const stillOpen = (await rerender()).find((node) => node.props?.className === 'tbi-roll');
+if (stillOpen?.props['data-open'] !== true) {
+  throw new Error('leaving a pinned list folded it away');
+}
+// Clear the selection for the remaining checks.
+const clearPin = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearPin !== undefined) { clearPin.props.onClick(); await rerender(); }
+// The two lists fold at different depths on purpose: models are scanned, the
+// workspace a bill is filed under is read. Assert both, so a change to one is a
+// deliberate change rather than a side effect.
+const depthOf = (card, foldedCount) => {
+  const rows = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
+  const open = card.props['data-open'];
+  return { rows: rows.length, open, expectedToFold: rows.length > foldedCount };
+};
+const modelDepth = depthOf(rollCards[0], 10);
+const cwdDepth = depthOf(rollCards[1], 15);
+console.log('model list depth:', JSON.stringify(modelDepth), '| workspace list depth:', JSON.stringify(cwdDepth));
+if (modelDepth.rows > 10 && modelDepth.open === true) {
+  throw new Error('the model list opened by itself');
+}
+if (cwdDepth.rows > 15 && cwdDepth.open === true) {
+  throw new Error('the workspace list opened by itself');
+}
+if (cwdDepth.rows <= 15 && cwdDepth.expectedToFold === false && cwdDepth.open === false) {
+  // nothing to fold, and the list is showing everything: correct
+}
+// The roller is the affordance that says "there is more under here".
+const rollers = nodes.filter((node) => node.props?.className === 'tbi-rollHandle');
+console.log('rollers:', rollers.length);
+if (rollers.length === 0) throw new Error('no roller rendered under a folded list');
+//#endregion
+
 //#region headline exact counts and the bar tooltip's session count
 // The bar tooltip used to report "0 sessions" on every day: the window slice
 // rebuilt the day rows without carrying the session count through. A day that
 // has spend but claims zero sessions is a lie the tooltip told on every hover.
 const dayTips = nodes.filter((node) => node.props?.className === 'tbi-col');
 if (dayTips.length === 0) throw new Error('no day columns to hover');
-const firstBusy = dayTips.find((node) => {
-  const rect = (node.children ?? []).find((child) => child?.tag === 'rect');
-  return rect !== undefined && Number(rect.props?.height) > 10;
-});
-if (firstBusy === undefined) throw new Error('no busy day column to inspect');
-const tipLines = String(firstBusy.props.onMouseEnter ?? '').length > 0 ? 'has handler' : 'no handler';
-console.log('busy day column:', tipLines);
-
-// Hover a busy day and read the session count off the tooltip. The window slice
-// used to drop that field, so every day claimed "0 sessions" even on days with
-// real spend.
-firstBusy.props.onMouseEnter();
+// Pick a day that actually has spend. After the stacked-by-model change the
+// first rect in a column is the hover shadow or the hit band, so "tallest rect"
+// no longer identifies a busy day — ask the tooltip instead.
+//
+// The card is dwell-gated: it appears one second after the pointer comes to
+// rest, so this has to wait for the timer before it can read anything.
+const tipOf = async (node) => {
+  node.props.onMouseEnter();
+  let text = '';
+  for (let pass = 0; pass < 20; pass += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    dirty = false;
+    effects = [];
+    frameIndex = 0;
+    tree = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    const hovered = walkCurrent();
+    // Several charts mount their own tooltip, so take the first one: the daily
+    // card is rendered above the heatmap and the model card.
+    // Several charts mount a tooltip, and a hover left over from an earlier
+    // check keeps its card alive. The daily one is marked, so ask for it by
+    // name instead of taking the first in tree order.
+    const tip = hovered.find(
+      (entry) => entry.props?.className === 'tbi-tooltip' && entry.props['data-owner'] === 'daily',
+    );
+    text = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+    if (text.length > 0) break;
+  }
+  return text;
+};
+let firstBusy;
 let dayTipText = '';
-for (let pass = 0; pass < 6; pass += 1) {
-  dirty = false;
-  effects = [];
-  frameIndex = 0;
-  tree = renderNode(React.createElement(page.component, { t }));
-  for (const effect of effects) effect();
-  const hoverNodes = walkCurrent();
-  const tip = hoverNodes.find((node) => node.props?.className === 'tbi-tooltip');
-  dayTipText = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
-  if (dayTipText.length > 0 && !dirty) break;
+// Each probe waits out the dwell timer, so only try a few columns: the first
+// busy one is enough, and the fixture's recent days all have spend.
+const firstProbe = await tipOf(dayTips[dayTips.length - 1]);
+console.log('last-column probe:', JSON.stringify(firstProbe.slice(0, 80)));
+for (const column of dayTips) {
+  const text = await tipOf(column);
+  if (text.includes(zh.sessionsUnit) && !text.includes(zh.noSpend)) {
+    const line = text.split('\n').find((entry) => entry.includes(zh.sessionsUnit));
+    if (Number(String(line).replace(/[^\d]/g, '')) > 0) {
+      firstBusy = column;
+      dayTipText = text;
+      break;
+    }
+  }
 }
+if (firstBusy === undefined) throw new Error('no day column with real spend to inspect');
+console.log('busy day column:', 'has handler');
 console.log('day tooltip:', JSON.stringify(dayTipText));
 const sessionLine = dayTipText.split('\n').find((line) => line.includes(zh.sessionsUnit));
 console.log('session line:', JSON.stringify(sessionLine ?? ''));
@@ -714,6 +1160,178 @@ if (!(declared > 0)) {
 // headline figure (cacheRead over the day's four buckets). Without it, a day
 // could only be judged by its raw cacheRead, which says nothing about how much
 // of that day's prompt traffic was served from cache.
+//#region the card waits for the pointer to rest
+// A tooltip that follows the pointer pops up on every column it crosses while
+// the reader is only scanning the shape. The card must wait for stillness, stay
+// put while the pointer moves inside the column, and go away on leaving the
+// column's x-range.
+// Use the column the earlier check already proved has spend, so the card it
+// opens is the full one rather than the "no spend" variant.
+const dwellColumn = firstBusy ?? dayTips[0];
+dwellColumn.props.onMouseLeave();
+const afterLeave = await rerender();
+const tipAfterLeave = afterLeave.filter((node) => node.props?.className === 'tbi-tooltip');
+const dailyAfterLeave = tipAfterLeave.find((node) => node.props['data-owner'] === 'daily');
+console.log('cards after leaving the column:', tipAfterLeave.length);
+if (dailyAfterLeave !== undefined) {
+  const textAfterLeave = (dailyAfterLeave.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (textAfterLeave.includes(zh.sessionsUnit)) {
+    throw new Error(`leaving the column left the day card up: ${JSON.stringify(textAfterLeave)}`);
+  }
+}
+// A fresh hover must not show anything immediately: the point is the wait.
+dwellColumn.props.onMouseEnter();
+// Re-render once before reading: a synchronous setState (which is what a
+// missing dwell timer degenerates to) only shows up in the next frame.
+dirty = true;
+const enterFrame = await collectAll(
+  (() => {
+    frameIndex = 0;
+    effects = [];
+    const next = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    return next;
+  })(),
+);
+const flown = enterFrame.find(
+  (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+);
+if (flown !== undefined) {
+  const early = (flown.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (early.includes(zh.sessionsUnit)) {
+    throw new Error('the day card appeared before the pointer came to rest');
+  }
+}
+// Moving within the same column keeps the pending timer running rather than
+// cancelling it.
+dwellColumn.props.onMouseMove();
+dwellColumn.props.onMouseMove();
+// One frame, not `rerender`: that helper resets the hook frames between
+// passes, which would discard the state the timer just set.
+await new Promise((resolve) => setTimeout(resolve, 260));
+const restFrame = (() => {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  const next = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  return next;
+})();
+const afterRest = collectAll(restFrame).find(
+  (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+);
+const restText = afterRest === undefined ? '' : (afterRest.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+console.log('card after the pointer rests:', JSON.stringify(restText.slice(0, 40)));
+if (restText.length === 0) {
+  throw new Error('the day card never appeared after the pointer rested');
+}
+if (!restText.includes(zh.sessionsUnit)) {
+  throw new Error(`the card that opened is not the day card: ${JSON.stringify(restText.slice(0, 60))}`);
+}
+//#region the day card lists every model of that day
+// A busy day can carry a dozen models. The card used to stop at six, so it
+// quietly disagreed with the stack it was describing.
+const openCard = () => {
+  const frame = (() => {
+    dirty = false;
+    effects = [];
+    frameIndex = 0;
+    const next = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    return next;
+  })();
+  const tip = collectAll(frame).find(
+    (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+  );
+  return tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+};
+const openTipNow = openCard();
+const listedModels = openTipNow.split('\n').filter((line) => /^[\u25b8 ]/.test(line) && /\d/.test(line));
+const expectModels = collectAll(dwellColumn.children ?? [])
+  .filter((node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string')
+  .map((node) => node.props['data-model']);
+const distinctExpect = [...new Set(expectModels)];
+console.log('models in the open day:', distinctExpect.length, '| lines in the card:', listedModels.length);
+if (distinctExpect.length > 1 && listedModels.length !== distinctExpect.length) {
+  throw new Error(`the card lists ${listedModels.length} models but the column drew ${distinctExpect.length}`);
+}
+//#endregion
+
+// The arrow in the open card marks the slice under the pointer. Moving up and
+// down inside one column must move it: the card's text is rebuilt from live
+// state, not frozen when the timer fired.
+const arrowOf = (text) => {
+  const line = text.split('\n').find((entry) => entry.startsWith('\u25b8 '));
+  return line === undefined ? null : line.slice(2).split(' ')[0];
+};
+// Find two different model slices in the open column.
+const openSlices = collectAll(dwellColumn.children ?? []).filter(
+  (node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string',
+);
+const distinctSlices = [];
+const seenModels = new Set();
+for (const slice of openSlices) {
+  if (seenModels.has(slice.props['data-model'])) continue;
+  seenModels.add(slice.props['data-model']);
+  distinctSlices.push(slice);
+}
+console.log('distinct slices in the open column:', distinctSlices.length);
+if (distinctSlices.length >= 2) {
+  distinctSlices[0].props.onMouseEnter();
+  const firstArrow = arrowOf(openCard());
+  distinctSlices[1].props.onMouseEnter();
+  const secondArrow = arrowOf(openCard());
+  console.log('arrow over slice 1:', firstArrow, '| over slice 2:', secondArrow);
+  if (firstArrow === null || secondArrow === null) {
+    throw new Error('the open card lost its arrow marker');
+  }
+  if (firstArrow === secondArrow) {
+    throw new Error(`the arrow stayed on ${firstArrow} while the pointer moved to another slice`);
+  }
+} else {
+  console.log('note: the open column has a single model, so the arrow cannot move');
+}
+//#region one selection, reachable from either list
+// The legend swatch and the model card row are two views of one switch. Before
+// this they kept separate state: the swatch could select but never deselect
+// what the card had selected, and each could select the same model again.
+// Clear both the leftover filter and any lingering hover focus: an earlier
+// check leaves a slice hovered, and that pin is indistinguishable from a real
+// selection in this assertion.
+const clearAll1 = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearAll1 !== undefined) { clearAll1.props.onClick(); await rerender(); }
+const strayColumn = (await rerender()).find((node) => node.props?.className === 'tbi-col' && node.props['data-hover'] === true);
+if (strayColumn !== undefined) { strayColumn.props.onMouseLeave(); await rerender(); }
+const swatchA = (await rerender()).find((node) => node.props?.className === 'tbi-swatchBtn');
+if (swatchA === undefined) throw new Error('no legend swatch to click');
+swatchA.props.onClick();
+const selectedOnce = await rerender();
+const litAfterSwatch = selectedOnce.filter(
+  (node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true,
+);
+console.log('rows lit after a swatch click:', litAfterSwatch.length);
+if (litAfterSwatch.length === 0) throw new Error('the swatch no longer selects');
+// Clicking the same swatch again must clear it — that is the bug that was here.
+const swatchAgain = selectedOnce.find((node) => node.props?.className === 'tbi-swatchBtn');
+swatchAgain.props.onClick();
+const cleared = await rerender();
+const litAfterSecond = cleared.filter(
+  (node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true,
+);
+const dimmedAfter = cleared.filter(
+  (node) => node.tag === 'rect' && node.props?.['data-model'] !== undefined && Number(node.props?.style?.opacity ?? 1) < 0.5,
+);
+console.log('rows lit after clicking it again:', litAfterSecond.length, '| dimmed slices:', dimmedAfter.length);
+if (litAfterSecond.length !== 0) {
+  throw new Error('clicking the same swatch again did not deselect the model');
+}
+if (dimmedAfter.length !== 0) {
+  throw new Error('the chart still has dimmed slices after the selection was cleared');
+}
+//#endregion
+
+//#endregion
+
 const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
 console.log('cache share line:', JSON.stringify(shareLine ?? ''));
 if (shareLine === undefined) throw new Error('the day tooltip lost its cache share line');

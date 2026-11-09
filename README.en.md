@@ -93,15 +93,15 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
 ### Charts
 
 - **Daily spend** — three switchable views:
-  - **Bars** (default): stacked columns split into input, cache read, cache write and output.
+  - **Bars** (default): stacked columns where **each slice is a model** — the column answers "whose spend is this", not "what kind of cost is it". A stack of up to fourteen slices stays readable: hovering lifts the whole column on a shadow, and clicking a swatch in the legend dims every other model so one series can be followed across the window (the legend shows colours only — a dozen names would push the card head onto three lines — and the names arrive on hover). The four cost buckets (input / output / cache read / cache write) live on the hover card and in the per-turn detail.
   - **Trend**: a line with a filled area, for reading peaks and valleys.
   - **Cumulative**: running total across the window, so the steepest days stand out.
-  Every view supports hover details, and **clicking a day filters everything to it**. The chart covers every day in the current window — it is not capped at 30 days.
+  Every view supports hover details, and **clicking a day filters everything to it**. The column chart's card waits for the pointer to rest for a second — sweeping across the bars does not fire a popup per column — and once shown it stays while the pointer moves inside that column, closing only when it leaves the column's x-range. The chart covers every day in the current window — it is not capped at 30 days.
 - **Annual activity calendar** — a GitHub-style contribution grid covering the last 365 days in five green levels. It is deliberately **independent of the time window**, and clicking a cell filters by that day too. It shares the same per-day totals as the bar chart and refetches after every report load, so a given day agrees with the bar chart; it just spans 365 days where the bar chart spans the current window.
 - **By model** — split by `provider/model`, with percentages, ranked by spend. `aggregate` is Jet Hub's virtual aggregate route; the row names the real channel it is currently on (e.g. `qodercn · aggregate · 38.6%`), and its tooltip explains that it switches channels by credit expiry — history is not split by channel.
-- **By workspace** — grouped by each session's `cwd`. Beyond eight, the rest is collapsed with a total shown, so a truncated list never reads as missing data.
-- **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent.
-- **Call tree** — child sessions nested under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
+- **By workspace** — grouped by each session's `cwd`, **every row listed** — no cap, no fold, same as the model card.
+- **Sessions** — the main table. Click any row to expand that session's **per-turn timeline** (one three-segment bar per turn); delegated subagents keep their nesting indent. **Column heads sort** (session / tokens / turns / cache hit / last activity, click again to reverse), and the table **pages** ten rows at a time with a 50 / 100 switch and a footer naming the slice.
+- **Call tree** — draws exactly the sessions the session table is showing, in the same order, so paging one pages both. Child sessions nest under their parent, with light and dark fills separating what the session spent itself from what its delegated children spent. Clicking a node scrolls smoothly to its table row and expands it.
 
 ### Cross-filtering
 
@@ -110,6 +110,8 @@ Four facets filter each other: day, model, workspace, and session state (live / 
 Click a day column, a model bar or a workspace bar and the other cards plus the session list recompute immediately — pick a model and the workspace list narrows to the workspaces that used it, with the session totals scoped the same way.
 
 The bar above the session table lists the active filters; each can be removed on its own, or cleared all at once.
+
+Selecting a day also moves the **headline cards**: the first turns from "Total tokens" into "That day", and its caption becomes that date. A headline stuck at 9.7B while the charts below had narrowed to one day was the easiest thing in this panel to misread as "my click did nothing".
 
 > Jumping from the call tree into the session table clears any filter that would hide the target, so the row is always found.
 
