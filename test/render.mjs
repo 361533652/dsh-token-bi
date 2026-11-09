@@ -644,6 +644,31 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region the inner scrollers hand the wheel back to the page
+// With the pointer over the session table the page used to stop dead, even when
+// the table had nothing to scroll. The rule: the list keeps the gesture while it
+// has somewhere to go, and the page takes it otherwise.
+const wh = moduleExports.wheelIntent;
+if (typeof wh !== 'function') throw new Error('wheelIntent is not exported');
+const tall = { scrollTop: 100, clientHeight: 200, scrollHeight: 900 };
+const atTop = { scrollTop: 0, clientHeight: 200, scrollHeight: 900 };
+const atEnd = { scrollTop: 700, clientHeight: 200, scrollHeight: 900 };
+const short = { scrollTop: 0, clientHeight: 200, scrollHeight: 200 };
+const wheelCases = [
+  ['mid-list down', { deltaY: 40, deltaX: 0 }, tall, 'list'],
+  ['mid-list up', { deltaY: -40, deltaX: 0 }, tall, 'list'],
+  ['top, still going up', { deltaY: -40, deltaX: 0 }, atTop, 'page'],
+  ['end, still going down', { deltaY: 40, deltaX: 0 }, atEnd, 'page'],
+  ['nothing to scroll', { deltaY: 40, deltaX: 0 }, short, 'page'],
+  ['horizontal', { deltaY: 0, deltaX: 90 }, tall, 'list'],
+];
+for (const [name, wheelEvent, box, want] of wheelCases) {
+  const got = wh(wheelEvent, box);
+  console.log(`wheel ${name}: ${got}`);
+  if (got !== want) throw new Error(`wheel ${name} gave ${got}, expected ${want}`);
+}
+//#endregion
+
 //#region the table and the call tree show one selection
 // Both cards are views of the same set: whatever the table draws, the tree
 // draws, in the same order. They used to read different arrays — the table its
