@@ -107,6 +107,12 @@ let registration;
  * left open, or sitting in the background, has to stay quiet.
  */
 const timers = [];
+const dwellTimers = [];
+// Shorten the tooltip's dwell window: the test still exercises the timer, it
+// just does not wait a full second per column.
+// Long enough that a single render pass cannot outwait it (each pass sleeps
+// ~40 ms), short enough that the suite stays fast.
+globalThis.__tbiDwellMs = 200;
 const requests = [];
 const listeners = [];
 /** Stand-in for the browser's localStorage, so the paint cache is exercised. */
@@ -127,6 +133,12 @@ const window = {
     return timers.length;
   },
   clearInterval: () => {},
+  // The column tooltip waits for the pointer to rest before showing, so the page
+  // needs a real timer. It is deliberately *not* pushed into `timers`: that list
+  // exists to prove no passive polling is running, and a dwell timer is an
+  // interaction, not a poll.
+  setTimeout: (fn, ms) => { dwellTimers.push(ms); return setTimeout(fn, ms); },
+  clearTimeout: (handle) => clearTimeout(handle),
   // The panel subscribes to focus so a background window catches up as soon as
   // it is brought forward; the stub only has to accept and remember it.
   addEventListener: (type) => {
@@ -884,26 +896,41 @@ if (dayTips.length === 0) throw new Error('no day columns to hover');
 // Pick a day that actually has spend. After the stacked-by-model change the
 // first rect in a column is the hover shadow or the hit band, so "tallest rect"
 // no longer identifies a busy day — ask the tooltip instead.
-const tipOf = (node) => {
+//
+// The card is dwell-gated: it appears one second after the pointer comes to
+// rest, so this has to wait for the timer before it can read anything.
+const tipOf = async (node) => {
   node.props.onMouseEnter();
   let text = '';
-  for (let pass = 0; pass < 4; pass += 1) {
+  for (let pass = 0; pass < 20; pass += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
     dirty = false;
     effects = [];
     frameIndex = 0;
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     const hovered = walkCurrent();
-    const tip = hovered.find((entry) => entry.props?.className === 'tbi-tooltip');
+    // Several charts mount their own tooltip, so take the first one: the daily
+    // card is rendered above the heatmap and the model card.
+    // Several charts mount a tooltip, and a hover left over from an earlier
+    // check keeps its card alive. The daily one is marked, so ask for it by
+    // name instead of taking the first in tree order.
+    const tip = hovered.find(
+      (entry) => entry.props?.className === 'tbi-tooltip' && entry.props['data-owner'] === 'daily',
+    );
     text = tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
-    if (text.length > 0 && !dirty) break;
+    if (text.length > 0) break;
   }
   return text;
 };
 let firstBusy;
 let dayTipText = '';
+// Each probe waits out the dwell timer, so only try a few columns: the first
+// busy one is enough, and the fixture's recent days all have spend.
+const firstProbe = await tipOf(dayTips[dayTips.length - 1]);
+console.log('last-column probe:', JSON.stringify(firstProbe.slice(0, 80)));
 for (const column of dayTips) {
-  const text = tipOf(column);
+  const text = await tipOf(column);
   if (text.includes(zh.sessionsUnit) && !text.includes(zh.noSpend)) {
     const line = text.split('\n').find((entry) => entry.includes(zh.sessionsUnit));
     if (Number(String(line).replace(/[^\d]/g, '')) > 0) {
@@ -928,6 +955,76 @@ if (!(declared > 0)) {
 // headline figure (cacheRead over the day's four buckets). Without it, a day
 // could only be judged by its raw cacheRead, which says nothing about how much
 // of that day's prompt traffic was served from cache.
+//#region the card waits for the pointer to rest
+// A tooltip that follows the pointer pops up on every column it crosses while
+// the reader is only scanning the shape. The card must wait for stillness, stay
+// put while the pointer moves inside the column, and go away on leaving the
+// column's x-range.
+// Use the column the earlier check already proved has spend, so the card it
+// opens is the full one rather than the "no spend" variant.
+const dwellColumn = firstBusy ?? dayTips[0];
+dwellColumn.props.onMouseLeave();
+const afterLeave = await rerender();
+const tipAfterLeave = afterLeave.filter((node) => node.props?.className === 'tbi-tooltip');
+const dailyAfterLeave = tipAfterLeave.find((node) => node.props['data-owner'] === 'daily');
+console.log('cards after leaving the column:', tipAfterLeave.length);
+if (dailyAfterLeave !== undefined) {
+  const textAfterLeave = (dailyAfterLeave.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (textAfterLeave.includes(zh.sessionsUnit)) {
+    throw new Error(`leaving the column left the day card up: ${JSON.stringify(textAfterLeave)}`);
+  }
+}
+// A fresh hover must not show anything immediately: the point is the wait.
+dwellColumn.props.onMouseEnter();
+// Re-render once before reading: a synchronous setState (which is what a
+// missing dwell timer degenerates to) only shows up in the next frame.
+dirty = true;
+const enterFrame = await collectAll(
+  (() => {
+    frameIndex = 0;
+    effects = [];
+    const next = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    return next;
+  })(),
+);
+const flown = enterFrame.find(
+  (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+);
+if (flown !== undefined) {
+  const early = (flown.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+  if (early.includes(zh.sessionsUnit)) {
+    throw new Error('the day card appeared before the pointer came to rest');
+  }
+}
+// Moving within the same column keeps the pending timer running rather than
+// cancelling it.
+dwellColumn.props.onMouseMove();
+dwellColumn.props.onMouseMove();
+// One frame, not `rerender`: that helper resets the hook frames between
+// passes, which would discard the state the timer just set.
+await new Promise((resolve) => setTimeout(resolve, 260));
+const restFrame = (() => {
+  dirty = false;
+  effects = [];
+  frameIndex = 0;
+  const next = renderNode(React.createElement(page.component, { t }));
+  for (const effect of effects) effect();
+  return next;
+})();
+const afterRest = collectAll(restFrame).find(
+  (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+);
+const restText = afterRest === undefined ? '' : (afterRest.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+console.log('card after the pointer rests:', JSON.stringify(restText.slice(0, 40)));
+if (restText.length === 0) {
+  throw new Error('the day card never appeared after the pointer rested');
+}
+if (!restText.includes(zh.sessionsUnit)) {
+  throw new Error(`the card that opened is not the day card: ${JSON.stringify(restText.slice(0, 60))}`);
+}
+//#endregion
+
 const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
 console.log('cache share line:', JSON.stringify(shareLine ?? ''));
 if (shareLine === undefined) throw new Error('the day tooltip lost its cache share line');
