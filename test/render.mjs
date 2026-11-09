@@ -989,6 +989,26 @@ if (stillOpen?.props['data-open'] !== true) {
 // Clear the selection for the remaining checks.
 const clearPin = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
 if (clearPin !== undefined) { clearPin.props.onClick(); await rerender(); }
+// The two lists fold at different depths on purpose: models are scanned, the
+// workspace a bill is filed under is read. Assert both, so a change to one is a
+// deliberate change rather than a side effect.
+const depthOf = (card, foldedCount) => {
+  const rows = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
+  const open = card.props['data-open'];
+  return { rows: rows.length, open, expectedToFold: rows.length > foldedCount };
+};
+const modelDepth = depthOf(rollCards[0], 10);
+const cwdDepth = depthOf(rollCards[1], 16);
+console.log('model list depth:', JSON.stringify(modelDepth), '| workspace list depth:', JSON.stringify(cwdDepth));
+if (modelDepth.rows > 10 && modelDepth.open === true) {
+  throw new Error('the model list opened by itself');
+}
+if (cwdDepth.rows > 16 && cwdDepth.open === true) {
+  throw new Error('the workspace list opened by itself');
+}
+if (cwdDepth.rows <= 16 && cwdDepth.expectedToFold === false && cwdDepth.open === false) {
+  // nothing to fold, and the list is showing everything: correct
+}
 // The roller is the affordance that says "there is more under here".
 const rollers = nodes.filter((node) => node.props?.className === 'tbi-rollHandle');
 console.log('rollers:', rollers.length);
