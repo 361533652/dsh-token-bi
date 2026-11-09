@@ -640,9 +640,20 @@ if (!text.includes(zh.columnSession)) throw new Error('session table lost its he
 const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.fill === 'string' && node.props.fill.includes('color-mix'));
 console.log('model-coloured slices:', stackedSlices.length);
 if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked by model');
-const legendButtons = nodes.filter((node) => node.props?.className === 'tbi-legendItem' && typeof node.props?.onClick === 'function');
-console.log('model legend entries:', legendButtons.length);
+// The legend is swatches only now: names would push a dozen models onto three
+// lines. Identity arrives on hover, so each swatch must carry its label for
+// both the pointer and assistive tech.
+const legendButtons = nodes.filter((node) => node.props?.className === 'tbi-swatchBtn');
+console.log('model legend swatches:', legendButtons.length);
 if (legendButtons.length < 2) throw new Error('the model legend did not render');
+const labelled = legendButtons.filter((node) => String(node.props?.['aria-label'] ?? '').includes('/'));
+if (labelled.length !== legendButtons.length) {
+  throw new Error(`only ${labelled.length} of ${legendButtons.length} swatches name their model`);
+}
+const hoverable = legendButtons.filter((node) => typeof node.props?.onMouseEnter === 'function');
+if (hoverable.length !== legendButtons.length) {
+  throw new Error('a swatch cannot be identified: it has no hover handler');
+}
 
 // Hovering a slice must isolate its model: every other slice in the chart fades.
 // The slice has to be the thing under the pointer, so the hit band must sit
@@ -716,6 +727,23 @@ const headlineUnfiltered = figBeforeFilter === undefined ? '' : figBeforeFilter;
 if (headlineNow === headlineUnfiltered) {
   throw new Error(`the headline ignored the model filter: ${headlineNow}`);
 }
+// The link has to work the other way too: pinning a model in the chart's
+// legend must light up that model's row in the model card. Before this the
+// two lists kept their own idea of "focused" and only one direction worked.
+// Clear any model filter left by the earlier checks: a lingering selection
+// would light a row for the wrong reason and make this check vacuous.
+const clearModelTag = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearModelTag !== undefined) { clearModelTag.props.onClick(); await rerender(); }
+const beforePin = (await rerender()).filter((node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true);
+if (beforePin.length !== 0) throw new Error('a row is lit before any pin, so this check cannot tell what lit it');
+const swatch = nodes.find((node) => node.props?.className === 'tbi-swatchBtn');
+if (swatch === undefined) throw new Error('no legend swatch to pin');
+const pinnedKey = swatch.props['aria-label'];
+swatch.props.onClick();
+const afterPin = await rerender();
+const litRows = afterPin.filter((node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true);
+console.log('rows lit by the legend pin:', litRows.length, 'expected model:', pinnedKey);
+if (litRows.length === 0) throw new Error('pinning a legend swatch did not light the model card row');
 //#endregion
 //#endregion
 

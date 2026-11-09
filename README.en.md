@@ -93,7 +93,7 @@ The entry is a global sidebar panel, on the same level as **Plugins** and **Sche
 ### Charts
 
 - **Daily spend** — three switchable views:
-  - **Bars** (default): stacked columns where **each slice is a model** — the column answers "whose spend is this", not "what kind of cost is it". A stack of up to fourteen slices stays readable: hovering lifts the whole column on a shadow, and clicking a name in the legend dims every other model so one series can be followed across the window. The four cost buckets (input / output / cache read / cache write) live on the hover card and in the per-turn detail.
+  - **Bars** (default): stacked columns where **each slice is a model** — the column answers "whose spend is this", not "what kind of cost is it". A stack of up to fourteen slices stays readable: hovering lifts the whole column on a shadow, and clicking a swatch in the legend dims every other model so one series can be followed across the window (the legend shows colours only — a dozen names would push the card head onto three lines — and the names arrive on hover). The four cost buckets (input / output / cache read / cache write) live on the hover card and in the per-turn detail.
   - **Trend**: a line with a filled area, for reading peaks and valleys.
   - **Cumulative**: running total across the window, so the steepest days stand out.
   Every view supports hover details, and **clicking a day filters everything to it**. The chart covers every day in the current window — it is not capped at 30 days.
