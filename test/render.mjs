@@ -672,6 +672,51 @@ if (dimmedOthers.length !== others.length) {
 if (sameSeries.some((node) => Number(node.props?.style?.opacity ?? 1) < 0.5)) {
   throw new Error('the hovered model was dimmed along with the others');
 }
+
+//#region the model card and the chart share one focus
+// Clicking a row in the model card is a real filter, and the stacked chart has
+// to follow it: the row the reader just picked is the series they are looking
+// at, so the other slices must dim exactly as they do on hover. The two used to
+// keep separate state and drift apart.
+const modelRow = nodes.find((node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function');
+if (modelRow === undefined) throw new Error('the model card rendered no clickable rows');
+const figBeforeFilter = (() => {
+  const fig = nodes.find((n) => n.props?.className === 'tbi-figure');
+  return (fig?.children ?? []).map((c) => c?.[TEXT] ?? (c?.children ?? []).map((g) => g?.[TEXT] ?? '').join('')).join('');
+})();
+modelRow.props.onClick();
+const afterFilter = await rerender();
+const focusedAfter = afterFilter.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && Number(node.props?.style?.opacity ?? 1) >= 0.5,
+);
+const dimAfter = afterFilter.filter(
+  (node) => node.tag === 'rect'
+    && typeof node.props?.['data-model'] === 'string'
+    && Number(node.props?.style?.opacity ?? 1) < 0.5,
+);
+console.log('after filtering by a model card row: kept', focusedAfter.length, 'dimmed', dimAfter.length);
+if (focusedAfter.length === 0) throw new Error('the chart shows no series after filtering, so nothing is focused');
+// A filter narrows the data, so the only slices left are the selected model's;
+// there may be nothing to dim. What must hold is that the chart did not error
+// out and still renders slices for the chosen model.
+const chosen = focusedAfter[0]?.props?.['data-model'];
+if (chosen === undefined) throw new Error('the chart lost its series identity after filtering');
+console.log('chart focused on:', chosen);
+// The filter must also narrow the headline, or the chart and the cards would
+// be describing two different things.
+const figNow = afterFilter.find((n) => n.props?.className === 'tbi-figure');
+const headlineNow = (figNow?.children ?? []).map((c) => c?.[TEXT] ?? (c?.children ?? []).map((g) => g?.[TEXT] ?? '').join('')).join('');
+console.log('headline while filtered:', JSON.stringify(headlineNow));
+// The headline must narrow with the model filter. Its `totals` memo used to
+// omit `facets` from its dependency list, so the cards stayed on the all-model
+// figures while every chart below had already narrowed to one model.
+const headlineUnfiltered = figBeforeFilter === undefined ? '' : figBeforeFilter;
+if (headlineNow === headlineUnfiltered) {
+  throw new Error(`the headline ignored the model filter: ${headlineNow}`);
+}
+//#endregion
 //#endregion
 
 //#region a selected day moves the headline numbers
