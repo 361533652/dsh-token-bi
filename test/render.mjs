@@ -1023,6 +1023,54 @@ if (restText.length === 0) {
 if (!restText.includes(zh.sessionsUnit)) {
   throw new Error(`the card that opened is not the day card: ${JSON.stringify(restText.slice(0, 60))}`);
 }
+// The arrow in the open card marks the slice under the pointer. Moving up and
+// down inside one column must move it: the card's text is rebuilt from live
+// state, not frozen when the timer fired.
+const openCard = () => {
+  const frame = (() => {
+    dirty = false;
+    effects = [];
+    frameIndex = 0;
+    const next = renderNode(React.createElement(page.component, { t }));
+    for (const effect of effects) effect();
+    return next;
+  })();
+  const tip = collectAll(frame).find(
+    (node) => node.props?.className === 'tbi-tooltip' && node.props['data-owner'] === 'daily',
+  );
+  return tip === undefined ? '' : (tip.children ?? []).map((child) => child?.[TEXT] ?? '').join('');
+};
+const arrowOf = (text) => {
+  const line = text.split('\n').find((entry) => entry.startsWith('\u25b8 '));
+  return line === undefined ? null : line.slice(2).split(' ')[0];
+};
+// Find two different model slices in the open column.
+const openSlices = collectAll(dwellColumn.children ?? []).filter(
+  (node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string',
+);
+const distinctSlices = [];
+const seenModels = new Set();
+for (const slice of openSlices) {
+  if (seenModels.has(slice.props['data-model'])) continue;
+  seenModels.add(slice.props['data-model']);
+  distinctSlices.push(slice);
+}
+console.log('distinct slices in the open column:', distinctSlices.length);
+if (distinctSlices.length >= 2) {
+  distinctSlices[0].props.onMouseEnter();
+  const firstArrow = arrowOf(openCard());
+  distinctSlices[1].props.onMouseEnter();
+  const secondArrow = arrowOf(openCard());
+  console.log('arrow over slice 1:', firstArrow, '| over slice 2:', secondArrow);
+  if (firstArrow === null || secondArrow === null) {
+    throw new Error('the open card lost its arrow marker');
+  }
+  if (firstArrow === secondArrow) {
+    throw new Error(`the arrow stayed on ${firstArrow} while the pointer moved to another slice`);
+  }
+} else {
+  console.log('note: the open column has a single model, so the arrow cannot move');
+}
 //#endregion
 
 const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
