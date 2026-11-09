@@ -793,10 +793,23 @@ if (!text.includes(zh.panel) || !text.includes(zh.heatmapTitle)) {
 // The workspace card lists every workspace in the drawn window, exactly like the
 // model card does. It used to stop at eight and fold the rest into a one-line
 // note, which hid real spend behind a number the reader could not act on.
-const cwdList = nodes.filter((node) => node.props?.className === 'tbi-cwdList');
-console.log('workspace list containers:', cwdList.length);
-if (cwdList.length !== 1) throw new Error(`expected one workspace list, found ${cwdList.length}`);
-const cwdRows = collectAll(cwdList[0].children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
+// Both cards roll up behind the same component, so find them by that class and
+// take the one holding workspace rows.
+const rollCards = nodes.filter((node) => node.props?.className === 'tbi-roll');
+console.log('scroll cards:', rollCards.length);
+if (rollCards.length !== 2) throw new Error(`expected two rolling lists, found ${rollCards.length}`);
+// Workspace rows are the ones whose tooltip names a path; model rows never do.
+// A workspace row renders its last two path segments, so it always contains a
+// separator; a model row never does.
+const looksLikePath = (node) => collectAll(node.children ?? []).some((leaf) => {
+  const value = leaf?.[TEXT];
+  return typeof value === 'string' && (value.includes('/') || value.includes('\\'));
+});
+const cwdList = rollCards.find((node) => collectAll(node.children ?? []).some(
+  (child) => child.props?.className === 'tbi-barRow' && looksLikePath(child),
+));
+if (cwdList === undefined) throw new Error('neither rolling list holds workspace rows');
+const cwdRows = collectAll(cwdList.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
 // The card draws the window, not the whole store, so compare against the
 // workspaces that actually have spend inside the 30-day preset.
 const drawnDays = new Set(dailyColumns.map((node) => node.children?.[0]?.props?.key ?? node.props?.key).filter(Boolean));
@@ -886,6 +899,80 @@ if (tipText.split('\n').length < 3) {
 if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
   throw new Error('bar tooltip omits the token count');
 }
+
+//#region the model and workspace cards roll up
+// Both lists sit at ten rows and unroll under the pointer. The height animates
+// to a measured value, so a longer list unrolls further and the cards below are
+// pushed down smoothly rather than jumped.
+for (const card of rollCards) {
+  const folds = card.props['data-folds'];
+  const open = card.props['data-open'];
+  const rowsIn = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow').length;
+  console.log('rolling card:', JSON.stringify({ rows: rowsIn, folds, open }));
+  if (rowsIn > 10 && folds !== true) {
+    throw new Error(`a ${rowsIn}-row list does not roll up`);
+  }
+  if (rowsIn <= 10 && folds === true) {
+    throw new Error(`a ${rowsIn}-row list rolls up with nothing to hide`);
+  }
+  if (folds === true) {
+    // Hovering opens it; leaving closes it again.
+    if (typeof card.props.onMouseEnter !== 'function') {
+      throw new Error('a rolling list cannot be opened: it has no hover handler');
+    }
+    const handler = card.props.onMouseEnter;
+    if (open === true) throw new Error('a rolling list started open');
+  }
+}
+// Hover opens, leaving closes.
+const firstRoll = rollCards[0];
+firstRoll.props.onMouseEnter();
+const opened = await rerender();
+const openedRoll = opened.find((node) => node.props?.className === 'tbi-roll');
+console.log('after hover:', JSON.stringify({ open: openedRoll?.props['data-open'] }));
+if (openedRoll?.props['data-open'] !== true) {
+  throw new Error('hovering a rolling list did not open it');
+}
+openedRoll.props.onMouseLeave();
+const closed = await rerender();
+const closedRoll = closed.find((node) => node.props?.className === 'tbi-roll');
+if (closedRoll?.props['data-open'] !== false) {
+  throw new Error('leaving a rolling list did not fold it back');
+}
+// A selected row pins the list open: folding away the row the user just clicked
+// would hide what they are reading.
+const modelRoll = closed.find((node) => node.props?.className === 'tbi-roll');
+const modelRowToPin = collectAll(modelRoll?.children ?? []).find(
+  (node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function',
+);
+if (modelRowToPin === undefined) throw new Error('no model row to select');
+modelRowToPin.props.onClick();
+const pinnedFrame = await rerender();
+const pinnedRoll = pinnedFrame.find((node) => node.props?.className === 'tbi-roll');
+console.log('after selecting a model row:', JSON.stringify({
+  open: pinnedRoll?.props['data-open'],
+  pinned: pinnedRoll?.props['data-pinned'],
+}));
+if (pinnedRoll?.props['data-open'] !== true) {
+  throw new Error('selecting a row inside the list did not pin it open');
+}
+if (pinnedRoll?.props['data-pinned'] !== true) {
+  throw new Error('the pinned list does not report itself as pinned');
+}
+// Leaving it must NOT fold a pinned list.
+pinnedRoll.props.onMouseLeave?.();
+const stillOpen = (await rerender()).find((node) => node.props?.className === 'tbi-roll');
+if (stillOpen?.props['data-open'] !== true) {
+  throw new Error('leaving a pinned list folded it away');
+}
+// Clear the selection for the remaining checks.
+const clearPin = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearPin !== undefined) { clearPin.props.onClick(); await rerender(); }
+// The roller is the affordance that says "there is more under here".
+const rollers = nodes.filter((node) => node.props?.className === 'tbi-rollHandle');
+console.log('rollers:', rollers.length);
+if (rollers.length === 0) throw new Error('no roller rendered under a folded list');
+//#endregion
 
 //#region headline exact counts and the bar tooltip's session count
 // The bar tooltip used to report "0 sessions" on every day: the window slice
