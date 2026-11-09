@@ -957,14 +957,31 @@ console.log('after selecting a model row:', JSON.stringify({
   open: pinnedRoll?.props['data-open'],
   pinned: pinnedRoll?.props['data-pinned'],
 }));
-if (pinnedRoll?.props['data-open'] !== true) {
-  throw new Error('selecting a row inside the list did not pin it open');
+// The row picked here sits inside the visible window, so it must NOT pin:
+// pinning on it would unroll the card for a click the user never made.
+if (pinnedRoll?.props['data-open'] !== false) {
+  throw new Error('selecting a row inside the visible window unrolled the card');
 }
-if (pinnedRoll?.props['data-pinned'] !== true) {
-  throw new Error('the pinned list does not report itself as pinned');
+if (pinnedRoll?.props['data-pinned'] !== false) {
+  throw new Error('a visible row reported itself as pinning the list');
 }
-// Leaving it must NOT fold a pinned list.
-pinnedRoll.props.onMouseLeave?.();
+// Now pick a row that lives below the fold: that one *must* pin, because
+// folding it away would hide the row the user just chose.
+const deepRow = collectAll(modelRoll?.children ?? [])
+  .filter((node) => node.props?.className === 'tbi-barRow' && typeof node.props?.onClick === 'function')
+  .at(11);
+if (deepRow === undefined) throw new Error('the fixture has no row below the fold');
+deepRow.props.onClick();
+const deepFrame = await rerender();
+const deepRoll = deepFrame.find((node) => node.props?.className === 'tbi-roll');
+console.log('after selecting a row below the fold:', JSON.stringify({
+  open: deepRoll?.props['data-open'],
+  pinned: deepRoll?.props['data-pinned'],
+}));
+if (deepRoll?.props['data-open'] !== true || deepRoll?.props['data-pinned'] !== true) {
+  throw new Error('selecting a row below the fold did not pin the list open');
+}
+deepRoll.props.onMouseLeave?.();
 const stillOpen = (await rerender()).find((node) => node.props?.className === 'tbi-roll');
 if (stillOpen?.props['data-open'] !== true) {
   throw new Error('leaving a pinned list folded it away');
@@ -1177,6 +1194,45 @@ if (distinctSlices.length >= 2) {
 } else {
   console.log('note: the open column has a single model, so the arrow cannot move');
 }
+//#region one selection, reachable from either list
+// The legend swatch and the model card row are two views of one switch. Before
+// this they kept separate state: the swatch could select but never deselect
+// what the card had selected, and each could select the same model again.
+// Clear both the leftover filter and any lingering hover focus: an earlier
+// check leaves a slice hovered, and that pin is indistinguishable from a real
+// selection in this assertion.
+const clearAll1 = (await rerender()).find((node) => node.props?.className === 'tbi-filterTagClose');
+if (clearAll1 !== undefined) { clearAll1.props.onClick(); await rerender(); }
+const strayColumn = (await rerender()).find((node) => node.props?.className === 'tbi-col' && node.props['data-hover'] === true);
+if (strayColumn !== undefined) { strayColumn.props.onMouseLeave(); await rerender(); }
+const swatchA = (await rerender()).find((node) => node.props?.className === 'tbi-swatchBtn');
+if (swatchA === undefined) throw new Error('no legend swatch to click');
+swatchA.props.onClick();
+const selectedOnce = await rerender();
+const litAfterSwatch = selectedOnce.filter(
+  (node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true,
+);
+console.log('rows lit after a swatch click:', litAfterSwatch.length);
+if (litAfterSwatch.length === 0) throw new Error('the swatch no longer selects');
+// Clicking the same swatch again must clear it — that is the bug that was here.
+const swatchAgain = selectedOnce.find((node) => node.props?.className === 'tbi-swatchBtn');
+swatchAgain.props.onClick();
+const cleared = await rerender();
+const litAfterSecond = cleared.filter(
+  (node) => node.props?.className === 'tbi-barRow' && node.props['data-selected'] === true,
+);
+const dimmedAfter = cleared.filter(
+  (node) => node.tag === 'rect' && node.props?.['data-model'] !== undefined && Number(node.props?.style?.opacity ?? 1) < 0.5,
+);
+console.log('rows lit after clicking it again:', litAfterSecond.length, '| dimmed slices:', dimmedAfter.length);
+if (litAfterSecond.length !== 0) {
+  throw new Error('clicking the same swatch again did not deselect the model');
+}
+if (dimmedAfter.length !== 0) {
+  throw new Error('the chart still has dimmed slices after the selection was cleared');
+}
+//#endregion
+
 //#endregion
 
 const shareLine = dayTipText.split('\n').find((line) => line.includes(zh.cacheShare));
