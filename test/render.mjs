@@ -998,15 +998,15 @@ const depthOf = (card, foldedCount) => {
   return { rows: rows.length, open, expectedToFold: rows.length > foldedCount };
 };
 const modelDepth = depthOf(rollCards[0], 10);
-const cwdDepth = depthOf(rollCards[1], 16);
+const cwdDepth = depthOf(rollCards[1], 15);
 console.log('model list depth:', JSON.stringify(modelDepth), '| workspace list depth:', JSON.stringify(cwdDepth));
 if (modelDepth.rows > 10 && modelDepth.open === true) {
   throw new Error('the model list opened by itself');
 }
-if (cwdDepth.rows > 16 && cwdDepth.open === true) {
+if (cwdDepth.rows > 15 && cwdDepth.open === true) {
   throw new Error('the workspace list opened by itself');
 }
-if (cwdDepth.rows <= 16 && cwdDepth.expectedToFold === false && cwdDepth.open === false) {
+if (cwdDepth.rows <= 15 && cwdDepth.expectedToFold === false && cwdDepth.open === false) {
   // nothing to fold, and the list is showing everything: correct
 }
 // The roller is the affordance that says "there is more under here".
