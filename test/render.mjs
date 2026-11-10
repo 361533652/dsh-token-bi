@@ -644,6 +644,26 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region no two models share a colour
+// The palette used to hash each model name into twelve hues, so forty models
+// put six of them on one colour and two slices in a column looked identical.
+// Colour is now assigned by rank, which makes repeats impossible while the
+// palette lasts.
+const swatches = nodes.filter((node) => node.props?.className === 'tbi-swatchBtn');
+const swatchColours = swatches.map((node) => {
+  const dot = collectAll(node.children ?? []).find((leaf) => leaf.tag === 'i');
+  return String(dot?.props?.style?.background ?? '');
+});
+const uniqueColours = new Set(swatchColours);
+console.log('legend swatches:', swatches.length, '| distinct colours:', uniqueColours.size);
+if (swatchColours.length > 0 && uniqueColours.size !== swatchColours.length) {
+  const seen = new Map();
+  for (const colour of swatchColours) seen.set(colour, (seen.get(colour) ?? 0) + 1);
+  const worst = [...seen.entries()].sort((a, b) => b[1] - a[1])[0];
+  throw new Error(`${swatchColours.length} models share only ${uniqueColours.size} colours (worst: ${worst[0]} x${worst[1]})`);
+}
+//#endregion
+
 //#region the inner scrollers hand the wheel back to the page
 // With the pointer over the session table the page used to stop dead, even when
 // the table had nothing to scroll. The rule: the list keeps the gesture while it
@@ -726,7 +746,7 @@ if (backBtn !== undefined) { backBtn.props.onClick(); await rerender(); }
 // Stacking by cost bucket answered "what kind of spend"; the question a bill
 // raises is "whose spend". Assert the column is split by model: a busy day must
 // carry more than one coloured slice when the data has more than one model.
-const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.fill === 'string' && node.props.fill.includes('color-mix'));
+const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string');
 console.log('model-coloured slices:', stackedSlices.length);
 if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked by model');
 // The legend is swatches only now: names would push a dozen models onto three
@@ -846,7 +866,7 @@ const textOf = (node) => (node.children ?? []).map((child) => child?.[TEXT] ?? c
 // and selecting one of those would legitimately zero the headline.
 const busyColumn = nodes
   .filter((node) => node.props?.className === 'tbi-col')
-  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && String(child.props?.fill ?? '').includes('color-mix')));
+  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && typeof child.props?.['data-model'] === 'string'));
 if (busyColumn === undefined) throw new Error('no day column with spend to click');
 busyColumn.props.onClick();
 const afterSelect = await rerender();
