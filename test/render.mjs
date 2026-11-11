@@ -644,6 +644,24 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 删除的说明小字不该回来
+// 卡片标题下的灰色小字曾经每张卡片都有。交互变多以后这些解释反而成了噪音，
+// 尤其「按日堆叠：输入/输出/缓存读/缓存写」已经和实际图表不符。只保留两条
+// 真正说明行为的：热力图不受窗口限制、模型卡只列有 token 的模型。
+const cardHints = nodes.filter((node) => node.props?.className === 'tbi-cardHint');
+const hintText = cardHints.map((node) => (node.children ?? []).map((c) => c?.[TEXT] ?? '').join(''));
+console.log('card hints:', hintText.length, JSON.stringify(hintText));
+if (hintText.length > 2) {
+  throw new Error(`卡片小字又变多了：${hintText.length} 条 ${JSON.stringify(hintText)}`);
+}
+// 那条描述旧成本桶堆叠的文案必须消失：柱子现在按模型堆叠。
+for (const stale of ['输入 / 输出 / 缓存读 / 缓存写', '波峰波谷', '攀升轨迹', '逐轮时间线；子代理']) {
+  if (hintText.some((line) => line.includes(stale))) {
+    throw new Error(`过时的说明小字又出现了：${stale}`);
+  }
+}
+//#endregion
+
 //#region no two models share a colour
 // The palette used to hash each model name into twelve hues, so forty models
 // put six of them on one colour and two slices in a column looked identical.
@@ -896,15 +914,12 @@ const rollCards = nodes.filter((node) => node.props?.className === 'tbi-roll');
 console.log('scroll cards:', rollCards.length);
 if (rollCards.length !== 2) throw new Error(`expected two rolling lists, found ${rollCards.length}`);
 // Workspace rows are the ones whose tooltip names a path; model rows never do.
-// A workspace row renders its last two path segments, so it always contains a
-// separator; a model row never does.
-const looksLikePath = (node) => collectAll(node.children ?? []).some((leaf) => {
-  const value = leaf?.[TEXT];
-  return typeof value === 'string' && (value.includes('/') || value.includes('\\'));
-});
-const cwdList = rollCards.find((node) => collectAll(node.children ?? []).some(
-  (child) => child.props?.className === 'tbi-barRow' && looksLikePath(child),
-));
+// Ask for the workspace list by name. It used to be found by looking for a
+// slash in a row's text, but a model row carries "provider/model" too — so the
+// model card was picked, and every workspace assertion counted 40 models.
+const cwdList = rollCards.find((node) => node.props['data-list'] === 'workspaces');
+const modelList = rollCards.find((node) => node.props['data-list'] === 'models');
+if (modelList === undefined) throw new Error('the model list lost its name');
 if (cwdList === undefined) throw new Error('neither rolling list holds workspace rows');
 const cwdRows = collectAll(cwdList.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
 // The card draws the window, not the whole store, so compare against the
