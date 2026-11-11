@@ -644,6 +644,31 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 图例在图下，不在标题行
+// 卡片头一度同时放视图切换和最多 64 个色块，挤在标题右边折成一大块，把图表
+// 往下顶。图例解释的是这张图，就该在图的下面。
+const headOf = (list) => list.filter((node) => node.props?.className === 'tbi-cardHead');
+const legendInHead = headOf(nodes).filter((head) => collectAll(head.children ?? []).some(
+  (child) => child.props?.className === 'tbi-swatchRow',
+));
+console.log('legends still inside a card header:', legendInHead.length);
+if (legendInHead.length !== 0) {
+  throw new Error('图例不该挤在标题行，它该在图表下面');
+}
+const legendBlocks = nodes.filter((node) => node.props?.className === 'tbi-chartLegend');
+console.log('legend blocks under the chart:', legendBlocks.length);
+if (legendBlocks.length !== 1) {
+  throw new Error(`柱状图下面应该有且只有一块图例，实际 ${legendBlocks.length}`);
+}
+// 视图切换仍然在头部：它是导航，而且很短。
+const tabsInHead = headOf(nodes).filter((head) => collectAll(head.children ?? []).some(
+  (child) => child.props?.className === 'tbi-viewTabs',
+));
+if (tabsInHead.length !== 1) {
+  throw new Error('视图切换应该在卡片头部');
+}
+//#endregion
+
 //#region 删除的说明小字不该回来
 // 卡片标题下的灰色小字曾经每张卡片都有。交互变多以后这些解释反而成了噪音，
 // 尤其「按日堆叠：输入/输出/缓存读/缓存写」已经和实际图表不符。只保留两条
