@@ -644,6 +644,70 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 图例在图下，不在标题行
+// 卡片头一度同时放视图切换和最多 64 个色块，挤在标题右边折成一大块，把图表
+// 往下顶。图例解释的是这张图，就该在图的下面。
+const headOf = (list) => list.filter((node) => node.props?.className === 'tbi-cardHead');
+const legendInHead = headOf(nodes).filter((head) => collectAll(head.children ?? []).some(
+  (child) => child.props?.className === 'tbi-swatchRow',
+));
+console.log('legends still inside a card header:', legendInHead.length);
+if (legendInHead.length !== 0) {
+  throw new Error('图例不该挤在标题行，它该在图表下面');
+}
+const legendBlocks = nodes.filter((node) => node.props?.className === 'tbi-chartLegend');
+console.log('legend blocks under the chart:', legendBlocks.length);
+if (legendBlocks.length !== 1) {
+  throw new Error(`柱状图下面应该有且只有一块图例，实际 ${legendBlocks.length}`);
+}
+// 视图切换仍然在头部：它是导航，而且很短。
+const tabsInHead = headOf(nodes).filter((head) => collectAll(head.children ?? []).some(
+  (child) => child.props?.className === 'tbi-viewTabs',
+));
+if (tabsInHead.length !== 1) {
+  throw new Error('视图切换应该在卡片头部');
+}
+//#endregion
+
+//#region 删除的说明小字不该回来
+// 卡片标题下的灰色小字曾经每张卡片都有。交互变多以后这些解释反而成了噪音，
+// 尤其「按日堆叠：输入/输出/缓存读/缓存写」已经和实际图表不符。只保留两条
+// 真正说明行为的：热力图不受窗口限制、模型卡只列有 token 的模型。
+const cardHints = nodes.filter((node) => node.props?.className === 'tbi-cardHint');
+const hintText = cardHints.map((node) => (node.children ?? []).map((c) => c?.[TEXT] ?? '').join(''));
+console.log('card hints:', hintText.length, JSON.stringify(hintText));
+// 一张都不留：标题已经说清楚了，多一行灰字只是噪音。
+if (hintText.length !== 0) {
+  throw new Error(`卡片标题下又出现了说明小字：${JSON.stringify(hintText)}`);
+}
+// 那条描述旧成本桶堆叠的文案必须消失：柱子现在按模型堆叠。
+for (const stale of ['输入 / 输出 / 缓存读 / 缓存写', '波峰波谷', '攀升轨迹', '逐轮时间线；子代理']) {
+  if (hintText.some((line) => line.includes(stale))) {
+    throw new Error(`过时的说明小字又出现了：${stale}`);
+  }
+}
+//#endregion
+
+//#region no two models share a colour
+// The palette used to hash each model name into twelve hues, so forty models
+// put six of them on one colour and two slices in a column looked identical.
+// Colour is now assigned by rank, which makes repeats impossible while the
+// palette lasts.
+const swatches = nodes.filter((node) => node.props?.className === 'tbi-swatchBtn');
+const swatchColours = swatches.map((node) => {
+  const dot = collectAll(node.children ?? []).find((leaf) => leaf.tag === 'i');
+  return String(dot?.props?.style?.background ?? '');
+});
+const uniqueColours = new Set(swatchColours);
+console.log('legend swatches:', swatches.length, '| distinct colours:', uniqueColours.size);
+if (swatchColours.length > 0 && uniqueColours.size !== swatchColours.length) {
+  const seen = new Map();
+  for (const colour of swatchColours) seen.set(colour, (seen.get(colour) ?? 0) + 1);
+  const worst = [...seen.entries()].sort((a, b) => b[1] - a[1])[0];
+  throw new Error(`${swatchColours.length} models share only ${uniqueColours.size} colours (worst: ${worst[0]} x${worst[1]})`);
+}
+//#endregion
+
 //#region the inner scrollers hand the wheel back to the page
 // With the pointer over the session table the page used to stop dead, even when
 // the table had nothing to scroll. The rule: the list keeps the gesture while it
@@ -726,7 +790,7 @@ if (backBtn !== undefined) { backBtn.props.onClick(); await rerender(); }
 // Stacking by cost bucket answered "what kind of spend"; the question a bill
 // raises is "whose spend". Assert the column is split by model: a busy day must
 // carry more than one coloured slice when the data has more than one model.
-const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.fill === 'string' && node.props.fill.includes('color-mix'));
+const stackedSlices = nodes.filter((node) => node.tag === 'rect' && typeof node.props?.['data-model'] === 'string');
 console.log('model-coloured slices:', stackedSlices.length);
 if (stackedSlices.length === 0) throw new Error('the daily chart is not stacked by model');
 // The legend is swatches only now: names would push a dozen models onto three
@@ -846,7 +910,7 @@ const textOf = (node) => (node.children ?? []).map((child) => child?.[TEXT] ?? c
 // and selecting one of those would legitimately zero the headline.
 const busyColumn = nodes
   .filter((node) => node.props?.className === 'tbi-col')
-  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && String(child.props?.fill ?? '').includes('color-mix')));
+  .find((node) => collectAll(node.children ?? []).some((child) => child?.tag === 'rect' && typeof child.props?.['data-model'] === 'string'));
 if (busyColumn === undefined) throw new Error('no day column with spend to click');
 busyColumn.props.onClick();
 const afterSelect = await rerender();
@@ -876,15 +940,12 @@ const rollCards = nodes.filter((node) => node.props?.className === 'tbi-roll');
 console.log('scroll cards:', rollCards.length);
 if (rollCards.length !== 2) throw new Error(`expected two rolling lists, found ${rollCards.length}`);
 // Workspace rows are the ones whose tooltip names a path; model rows never do.
-// A workspace row renders its last two path segments, so it always contains a
-// separator; a model row never does.
-const looksLikePath = (node) => collectAll(node.children ?? []).some((leaf) => {
-  const value = leaf?.[TEXT];
-  return typeof value === 'string' && (value.includes('/') || value.includes('\\'));
-});
-const cwdList = rollCards.find((node) => collectAll(node.children ?? []).some(
-  (child) => child.props?.className === 'tbi-barRow' && looksLikePath(child),
-));
+// Ask for the workspace list by name. It used to be found by looking for a
+// slash in a row's text, but a model row carries "provider/model" too — so the
+// model card was picked, and every workspace assertion counted 40 models.
+const cwdList = rollCards.find((node) => node.props['data-list'] === 'workspaces');
+const modelList = rollCards.find((node) => node.props['data-list'] === 'models');
+if (modelList === undefined) throw new Error('the model list lost its name');
 if (cwdList === undefined) throw new Error('neither rolling list holds workspace rows');
 const cwdRows = collectAll(cwdList.children ?? []).filter((node) => node.props?.className === 'tbi-barRow');
 // The card draws the window, not the whole store, so compare against the
