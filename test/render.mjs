@@ -651,8 +651,9 @@ if (!text.includes(zh.columnSession)) throw new Error('session table lost its he
 const cardHints = nodes.filter((node) => node.props?.className === 'tbi-cardHint');
 const hintText = cardHints.map((node) => (node.children ?? []).map((c) => c?.[TEXT] ?? '').join(''));
 console.log('card hints:', hintText.length, JSON.stringify(hintText));
-if (hintText.length > 2) {
-  throw new Error(`卡片小字又变多了：${hintText.length} 条 ${JSON.stringify(hintText)}`);
+// 一张都不留：标题已经说清楚了，多一行灰字只是噪音。
+if (hintText.length !== 0) {
+  throw new Error(`卡片标题下又出现了说明小字：${JSON.stringify(hintText)}`);
 }
 // 那条描述旧成本桶堆叠的文案必须消失：柱子现在按模型堆叠。
 for (const stale of ['输入 / 输出 / 缓存读 / 缓存写', '波峰波谷', '攀升轨迹', '逐轮时间线；子代理']) {
