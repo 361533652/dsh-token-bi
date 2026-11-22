@@ -104,6 +104,17 @@ check('gmodel is GLM-5.3', priceOf('qodercn', 'gmodel') === PRICING['zhipu/glm-5
 check('gfmodel is GLM-5.3-Flash', priceOf('qodercn', 'gfmodel') === PRICING['zhipu/glm-5-3-flash']);
 // Codes the gateway lists but with no public rate behind them stay unpriced.
 check('an unpriced gateway model stays unknown', priceOf('qodercn', 'lmodel') === undefined);
+
+// Free tiers are priced at zero rather than left out. An omitted model would
+// show up as "unpriced tokens" and make a bill look incomplete when nothing
+// was billed at all.
+const freeFlash = priceOf('qodercn', 'qfmodel');
+check('the free-quota model resolves', freeFlash === PRICING['alibaba/qwen3.8-flash']);
+check('the free-quota model costs nothing',
+  costOf(freeFlash, { input: 10e6, cacheRead: 10e6, cacheWrite: 0, output: 10e6 }) === 0);
+const invite = priceOf('qw4', 'qwen-latest-series-invite-1102');
+check('the invite-only build resolves', invite === PRICING['alibaba/qwen-latest-invite']);
+check('the invite-only build costs nothing', costOf(invite, { input: 10e6, cacheRead: 0, cacheWrite: 0, output: 10e6 }) === 0);
 //#endregion
 
 //#region unknown stays unknown
