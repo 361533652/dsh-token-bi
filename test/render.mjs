@@ -341,7 +341,10 @@ if (firstReport.includes('refresh=1')) {
 // One request, for the whole history — and nothing else. The panel is not
 // allowed to reach the host again while the user works: windows are slices of
 // the report already in memory, so switching 7 / 30 / all costs no request.
-const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/'));
+// `/layout` is configuration, not data: the island reads its stored position
+// once at mount and never again. Everything else under the prefix is a data
+// fetch, and only one of those may happen on mount.
+const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/') && !url.includes('/layout'));
 console.log('data requests on mount:', dataRequests.length, '|', dataRequests.join(', '));
 if (dataRequests.length !== 1) {
   throw new Error(`mount issued ${dataRequests.length} data requests; exactly one report is allowed: ${dataRequests.join(', ')}`);
@@ -657,6 +660,24 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 卡片浮岛
+// 卡片区是可拖动的浮岛，位置存在 host 的 layout.json 里。这里能验的是：
+// 它真的渲染成浮岛、mount 时读过一次位置、且拖动结束后会写回去。
+const islands = nodes.filter((node) => node.props?.className === 'tbi-island');
+console.log('islands:', islands.length);
+if (islands.length !== 1) throw new Error(`应当只有一个浮岛，实际 ${islands.length}`);
+// 它必须是浮层且能拖：没有 mousedown 就完全拖不动，这比坐标更重要。
+if (typeof islands[0].props.onMouseDown !== 'function') throw new Error('浮岛不能拖动：没有 mousedown');
+if (!('data-ready' in islands[0].props)) throw new Error('浮岛没有就绪标记，位置到达前会闪一下');
+// mount 时读一次位置。读的是配置，不是数据，所以允许。
+const layoutReads = requests.filter((url) => url.includes('/layout'));
+console.log('layout reads at mount:', layoutReads.length);
+if (layoutReads.length !== 1) throw new Error(`打开时应读一次 layout，实际 ${layoutReads.length} 次`);
+// 八张卡片仍然完整地待在浮岛里。
+const islandFigures = collectAll(islands[0].children ?? []).filter((node) => node.props?.className === 'tbi-figure');
+if (islandFigures.length !== 8) throw new Error(`浮岛里应有 8 张卡片，实际 ${islandFigures.length}`);
+//#endregion
+
 //#region 顶部八张卡片
 // 四列布局配八张卡片，刚好两行。少了会空出一格（七张时第二行只有一张，
 // 右边一大片空白），多了会折出第三行。数量是布局契约的一部分。
