@@ -723,6 +723,27 @@ if (movedTransform === liftedTransform) {
   throw new Error('指针移动后磁贴没有跟着动');
 }
 
+// 纵向拖动也必须只交换两张：之前用的是「插入」语义，把一张从上排拖到下排
+// 会让中间一整排都移位，横向正常、纵向错乱。
+//
+// 这里检查**源码里的实际实现**（而不是在测试里复刻一份规则）：复刻的规则
+// 永远不会跟被测代码一起坏，那样的断言是假的。
+const sourceText = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+const swapBody = sourceText.slice(
+  sourceText.indexOf('const finish = (targetIndex) => {'),
+  sourceText.indexOf('const dragging = drag !== null;'),
+);
+if (swapBody.length === 0) throw new Error('找不到换位实现');
+// 必须是成对赋值（交换），不能是 splice（插入）。
+if (swapBody.includes('splice(')) {
+  throw new Error('换位用的是插入语义（splice），纵向拖动会推动一整排；应为两两交换');
+}
+if (!/next\[from\] = toId;\s*\n\s*next\[to\] = fromId;/.test(swapBody)) {
+  throw new Error('换位没有实现为两两交换');
+}
+console.log('swap semantics:', 'pairwise');
+
+
 // 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
 // 这里直接驱动组件暴露的回调——真实指针拖拽在 jsdom 里没有布局，测不了。
 const beforeIds = nodes
