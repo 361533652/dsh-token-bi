@@ -723,55 +723,30 @@ if (movedTransform === liftedTransform) {
   throw new Error('指针移动后磁贴没有跟着动');
 }
 
-// 纵向拖动也必须只交换两张：之前用的是「插入」语义，把一张从上排拖到下排
-// 会让中间一整排都移位，横向正常、纵向错乱。
-//
-// 这里检查**源码里的实际实现**（而不是在测试里复刻一份规则）：复刻的规则
-// 永远不会跟被测代码一起坏，那样的断言是假的。
+// 拼图式换位：每越过一个相邻格就立刻交换，位置当场落定——不是拖动时预览、
+// 松手才一次性交换。这里检查源码里的实现契约。
 const sourceText = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
-const swapBody = sourceText.slice(
-  sourceText.indexOf('const finish = (targetIndex) => {'),
-  sourceText.indexOf('const dragging = drag !== null;'),
-);
-if (swapBody.length === 0) throw new Error('找不到换位实现');
-// 必须是成对赋值（交换），不能是 splice（插入）。
-if (swapBody.includes('splice(')) {
-  throw new Error('换位用的是插入语义（splice），纵向拖动会推动一整排；应为两两交换');
-}
-if (!/next\[from\] = toId;\s*\n\s*next\[to\] = fromId;/.test(swapBody)) {
-  throw new Error('换位没有实现为两两交换');
-}
-console.log('swap semantics:', 'pairwise');
+const MOVE_ANCHOR = 'const onMove = (event) => {';
+const UP_ANCHOR = 'const onUp = () =>';
+const SWAP_ANCHOR = 'const swapAdjacent = (fromIndex, toIndex) => {';
 
-// 被交换的那张也必须动：只把拖动的卡片飞过去、对面纹丝不动，等于没有「换」。
-// 这里检查源码里的让位条件不能自相矛盾——曾经写成外层要求 index !== hoverSlot、
-// 内层又要求 index === hoverSlot，shiftTo 恒为 null，对面永远不动。
-const shiftBlock = sourceText.slice(
-  sourceText.indexOf('let shiftTo = null;'),
-  sourceText.indexOf('const style = {};'),
-);
-if (shiftBlock.length === 0) throw new Error('找不到让位逻辑');
-// 同一个条件里不能既排除又要求同一个下标。
-// Collect every comparison against `index` in the block, wherever it appears,
-// and decide whether the block can ever fire. Comparing the same variable both
-// ways means the body is unreachable — which is exactly the bug this guards.
-const guards = [...shiftBlock.matchAll(/hoverSlot\s*([!=]==)\s*index/g)].map((m) => m[1]);
-const requiresEqual = guards.includes('===');
-const requiresNotEqual = guards.includes('!==');
-if (requiresEqual && requiresNotEqual) {
-  throw new Error('让位条件自相矛盾（同一处既要求 hoverSlot === index 又要求 !== index），被交换的卡片不会移动');
+const moveBody = sourceText.slice(sourceText.indexOf(MOVE_ANCHOR), sourceText.indexOf(UP_ANCHOR));
+if (moveBody.length === 0) throw new Error('找不到拖动移动逻辑');
+// 交换必须发生在 mousemove 里，而不是等到松手。
+if (!moveBody.includes('swapAdjacent(')) {
+  throw new Error('交换没有发生在移动过程中，还是松手才落定');
 }
-if (!requiresEqual && !requiresNotEqual) {
-  throw new Error('让位逻辑没有判断悬停的是哪一张，被交换的卡片不会移动');
+const upBody = sourceText.slice(sourceText.indexOf(UP_ANCHOR), sourceText.indexOf(MOVE_ANCHOR) > 0 ? sourceText.indexOf('window.addEventListener', sourceText.indexOf(UP_ANCHOR)) : undefined);
+if (upBody.includes('swapAdjacent(') || upBody.includes('setOrder(')) {
+  throw new Error('松手时仍在改变顺序，位置应在移动中已经落定');
 }
-if (!shiftBlock.includes('shiftTo = fromIndex')) {
-  throw new Error('被交换的卡片没有让位位移');
+// 一次只能换相邻的一个格子。
+const swapStart = sourceText.indexOf(SWAP_ANCHOR);
+const swapBody = sourceText.slice(swapStart, sourceText.indexOf('};', swapStart) + 2);
+if (!swapBody.includes('toIndex > fromIndex ? 1 : -1')) {
+  throw new Error('换位不是按相邻一步走的');
 }
-// 位移必须真的算出来，不能只有标记。
-if (!shiftBlock.includes('translate(') && !sourceText.includes('target.left - slot.left')) {
-  throw new Error('让位没有产生位移');
-}
-console.log('swap partner motion:', 'present');
+console.log('puzzle swap:', 'adjacent, settled during the move');
 
 
 
