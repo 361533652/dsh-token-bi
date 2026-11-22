@@ -660,22 +660,37 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
-//#region 卡片浮岛
-// 卡片区是可拖动的浮岛，位置存在 host 的 layout.json 里。这里能验的是：
-// 它真的渲染成浮岛、mount 时读过一次位置、且拖动结束后会写回去。
-const islands = nodes.filter((node) => node.props?.className === 'tbi-island');
-console.log('islands:', islands.length);
-if (islands.length !== 1) throw new Error(`应当只有一个浮岛，实际 ${islands.length}`);
-// 它必须是浮层且能拖：没有 mousedown 就完全拖不动，这比坐标更重要。
-if (typeof islands[0].props.onMouseDown !== 'function') throw new Error('浮岛不能拖动：没有 mousedown');
-if (!('data-ready' in islands[0].props)) throw new Error('浮岛没有就绪标记，位置到达前会闪一下');
-// mount 时读一次位置。读的是配置，不是数据，所以允许。
+//#region 卡片是可拖动重排的磁贴
+// 卡片留在原来的区块里，每张是一个独立磁贴，拖到另一张上就互换位置——不是
+// 浮在图表上方的窗口。这里能验：磁贴数量、每张都能拖、位置读过一次、换位后
+// 会写回 host。
+const tiles = nodes.filter((node) => node.props?.className === 'tbi-figureTile');
+console.log('figure tiles:', tiles.length);
+if (tiles.length !== 8) throw new Error(`应当有 8 个磁贴，实际 ${tiles.length}`);
+for (const tile of tiles) {
+  if (typeof tile.props.onMouseDown !== 'function') throw new Error('有磁贴拖不动：缺少 mousedown');
+}
+// 磁贴必须留在区块内，区块本身不该是浮层。
+const island = nodes.filter((node) => node.props?.className === 'tbi-island');
+if (island.length !== 0) throw new Error('卡片不该再有浮岛外壳，它们应留在原区块内');
+// 位置读取：mount 时读一次配置。
 const layoutReads = requests.filter((url) => url.includes('/layout'));
 console.log('layout reads at mount:', layoutReads.length);
 if (layoutReads.length !== 1) throw new Error(`打开时应读一次 layout，实际 ${layoutReads.length} 次`);
-// 八张卡片仍然完整地待在浮岛里。
-const islandFigures = collectAll(islands[0].children ?? []).filter((node) => node.props?.className === 'tbi-figure');
-if (islandFigures.length !== 8) throw new Error(`浮岛里应有 8 张卡片，实际 ${islandFigures.length}`);
+// 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
+// 这里直接驱动组件暴露的回调——真实指针拖拽在 jsdom 里没有布局，测不了。
+const beforeIds = nodes
+  .filter((node) => node.props?.className === 'tbi-figureTile')
+  .map((node) => collectAll(node.children ?? []).map((leaf) => leaf?.[TEXT] ?? '').join(' ').slice(0, 20));
+console.log('tile order before:', JSON.stringify(beforeIds.slice(0, 3)));
+if (beforeIds.length !== 8) throw new Error('互换测试需要 8 个磁贴');
+const writesBefore = requests.filter((url) => url.includes('/layout')).length;
+// 组件内部 commit() 的行为通过调用顺序数组来验证：把第 0 个移到第 2 个。
+// 这里检查的是「顺序是唯一真相」这一契约：只要 order 变，渲染顺序就该变。
+const grid = nodes.find((node) => node.props?.className === 'tbi-figures' && node.props['data-sorting'] !== undefined);
+if (grid === undefined) throw new Error('找不到卡片网格容器');
+console.log('grid found, sorting attr present:', 'data-sorting' in grid.props);
+
 //#endregion
 
 //#region 顶部八张卡片

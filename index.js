@@ -464,10 +464,11 @@ export function apply(ctx) {
   };
 
   /**
-   * Where the floating card island sits, as a fraction of the viewport.
+   * The card order the reader dragged into place.
    *
-   * Stored as fractions rather than pixels so a position chosen on a wide
-   * window still lands somewhere sensible when the app is reopened narrow.
+   * A list of stable card ids rather than pixel coordinates: the cards live in a
+   * grid, so their position is a consequence of the order they come in. Storing
+   * the order means a rearranged board still reads correctly at any width.
    */
   const layoutPath = (root) => join(root, '.token-bi-cache', 'layout.json');
 
@@ -488,10 +489,15 @@ export function apply(ctx) {
     if (typeof value !== 'object' || value === null) return false;
     const dir = join(root, '.token-bi-cache');
     mkdirSync(dir, { recursive: true });
-    // Only the fields this plugin owns; anything else a client sends is dropped.
+    // Only the field this plugin owns, and only well-formed ids: a client cannot
+    // write arbitrary keys into the config file.
     const next = {};
-    if (typeof value.x === 'number' && Number.isFinite(value.x)) next.x = Math.min(1, Math.max(0, value.x));
-    if (typeof value.y === 'number' && Number.isFinite(value.y)) next.y = Math.min(1, Math.max(0, value.y));
+    if (Array.isArray(value.order)) {
+      next.order = value.order
+        .filter((id) => typeof id === 'string' && /^[a-z0-9-]{1,40}$/i.test(id))
+        .slice(0, 32);
+    }
+    if (next.order === undefined) return false;
     writeFileSync(layoutPath(root), JSON.stringify(next));
     return true;
   };
@@ -539,7 +545,7 @@ export function apply(ctx) {
         if (req.method === 'POST' || req.method === 'PUT') {
           const body = await readJsonBody(req);
           if (!writeLayout(body)) {
-            sendJson(res, 400, { error: 'layout must be { x, y } in 0..1' });
+            sendJson(res, 400, { error: 'layout must be { order: string[] }' });
             return;
           }
           sendJson(res, 200, { ok: true, layout: readLayout() });
