@@ -47,38 +47,51 @@ const check = (label, ok, detail) => {
 };
 
 //#region stepOrder
-const base = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+// The owner's rule, verbatim: with A B C D, dragging A onto C gives B C A D —
+// A takes C's slot, and B and C each slide back into the hole behind it.
+const base = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
-// One step is a plain adjacent swap.
-check('one step right swaps neighbours',
-  JSON.stringify(stepOrder(base, 'a', 1)) === JSON.stringify(['b', 'a', 'c', 'd', 'e', 'f', 'g', 'h']));
-check('one step left swaps neighbours',
-  JSON.stringify(stepOrder(base, 'b', 0)) === JSON.stringify(['b', 'a', 'c', 'd', 'e', 'f', 'g', 'h']));
-
-// A long move must pass through the neighbours, not jump over them: the result of
-// moving a card three places is the same as three one-place moves.
-const jump = stepOrder(base, 'a', 3);
-check('a long move lands the card at the target',
-  jump[3] === 'a' && jump.length === base.length, JSON.stringify(jump));
-check('a long move shifts every card it passes by exactly one',
-  jump[0] === 'b' && jump[1] === 'c' && jump[2] === 'd', JSON.stringify(jump.slice(0, 4)));
+check('A dragged onto C pushes the row',
+  JSON.stringify(stepOrder(base, 'A', 2)) === JSON.stringify(['B', 'C', 'A', 'D', 'E', 'F', 'G', 'H']),
+  JSON.stringify(stepOrder(base, 'A', 2)));
+check('one step right is a plain swap',
+  JSON.stringify(stepOrder(base, 'A', 1)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
+check('one step left is a plain swap',
+  JSON.stringify(stepOrder(base, 'B', 0)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
+// Dragging backwards pushes the other way: H onto E gives E F G H at the end.
+check('dragging backwards pulls the row forward',
+  JSON.stringify(stepOrder(base, 'H', 4)) === JSON.stringify(['A', 'B', 'C', 'D', 'H', 'E', 'F', 'G']),
+  JSON.stringify(stepOrder(base, 'H', 4)));
+// A vertical move in a four-column grid: slot 0 to slot 4 is one row down.
+check('a move into the next row lands in that slot',
+  JSON.stringify(stepOrder(base, 'A', 4)) === JSON.stringify(['B', 'C', 'D', 'E', 'A', 'F', 'G', 'H']),
+  JSON.stringify(stepOrder(base, 'A', 4)));
+// Continuing the same drag: after landing in slot 4, moving on to slot 5 pushes
+// the card that was there. Successive steps compose, which is what makes a long
+// drag a series of pushes rather than one jump.
+const afterFirst = stepOrder(base, 'A', 4);
+check('a second push in the same drag composes',
+  JSON.stringify(stepOrder(afterFirst, 'A', 5)) === JSON.stringify(['B', 'C', 'D', 'E', 'F', 'A', 'G', 'H']),
+  JSON.stringify(stepOrder(afterFirst, 'A', 5)));
 // Nothing outside the travelled range may move.
+const jumped = stepOrder(base, 'A', 3);
 check('cards beyond the range stay put',
-  jump[4] === 'e' && jump[7] === 'h');
+  jumped[0] === 'B' && jumped[1] === 'C' && jumped[2] === 'D' && jumped[3] === 'A'
+  && jumped[4] === 'E' && jumped[7] === 'H', JSON.stringify(jumped));
 
 // Out-of-range and unknown input must be inert, not throw.
 check('a target beyond the end is ignored',
-  JSON.stringify(stepOrder(base, 'a', 99)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(base, 'A', 99)) === JSON.stringify(base));
 check('a negative target is ignored',
-  JSON.stringify(stepOrder(base, 'a', -1)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(base, 'A', -1)) === JSON.stringify(base));
 check('an unknown id is ignored',
-  JSON.stringify(stepOrder(base, 'zz', 2)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(base, 'ZZ', 2)) === JSON.stringify(base));
 check('moving to where it already is changes nothing',
-  JSON.stringify(stepOrder(base, 'c', 2)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(base, 'C', 2)) === JSON.stringify(base));
 // The input array must not be mutated: the caller holds the previous order.
-const frozen = ['a', 'b', 'c'];
-stepOrder(frozen, 'a', 2);
-check('the input order is not mutated', JSON.stringify(frozen) === JSON.stringify(['a', 'b', 'c']));
+const frozen = ['A', 'B', 'C'];
+stepOrder(frozen, 'A', 2);
+check('the input order is not mutated', JSON.stringify(frozen) === JSON.stringify(['A', 'B', 'C']));
 //#endregion
 
 //#region mergeOrder
