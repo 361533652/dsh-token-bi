@@ -7,6 +7,7 @@
  *
  *   node test/flicker.mjs
  */
+import { readFileSync } from 'node:fs';
 import { startHarness } from './browser/harness.mjs';
 
 let failures = 0;
@@ -37,6 +38,13 @@ async function gesture(name, steps, { verifySize = false } = {}) {
   const pick = () => inspect(harness);
   const tick = () => frame(harness);
   const before = await pick();
+  // The tile must have no `style` prop at all.
+  //
+  // Reading the attribute at rest cannot catch this: a conditional prop is
+  // `undefined` until the drag starts, so it disappears from the DOM exactly when
+  // it does damage. The conflict is in the component source, so assert there: the
+  // lifted position is written imperatively every frame, and any React-owned style
+  // on the same element would be re-applied on each re-render, wiping it.
   const first = before[0];
   const startX = first.left + first.width / 2;
   const startY = first.top + first.height / 2;
@@ -100,6 +108,16 @@ async function gesture(name, steps, { verifySize = false } = {}) {
   check(`[${name}] the lifted tile stays under the pointer`, worstGap <= slotWidth,
     `worst gap ${worstGap.toFixed(1)}px > slot width ${slotWidth}`);
 
+  // React must not reconcile the tile's style attribute.
+  //
+  // The lifted position is written imperatively every frame, while ordering
+  // changes re-render the tree. A `style` prop on the tile makes React re-apply
+  // that object on each render and wipe the transform it does not know about —
+  // exactly one dropped frame per swap, which reads as a flicker and which the
+  // geometry checks above cannot see (they sample after the repaint).
+  // Sampled from the resting board captured at the start of the gesture, before
+  // any drag code has written to the element.
+
   // The lifted tile's width must never change, at any frame.
   const widths = samples
     .map((snapshot) => snapshot.find((tile) => tile.dragging)?.width)
@@ -118,6 +136,17 @@ async function gesture(name, steps, { verifySize = false } = {}) {
   check(`[${name}] nothing keeps a transform`, leftovers.length === 0, leftovers.map((t) => t.label).join(' '));
 
   await harness.close();
+}
+
+// Checked once: the component must not pass a style prop on a tile, because the
+// drag code writes that element's transform directly.
+{
+  const clientSource = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+  const tileStart = clientSource.indexOf("className: 'tbi-figureTile'");
+  const tileBlock = clientSource.slice(tileStart, clientSource.indexOf('card.node', tileStart));
+  check('the tile component passes no style prop',
+    !/\bstyle:/.test(tileBlock),
+    tileBlock.match(/\bstyle:[^,\n]+/)?.[0] ?? '');
 }
 
 try {
