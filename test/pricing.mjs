@@ -93,12 +93,23 @@ check('vendor tag resolves', priceOf('qiniu', 'deepseek/deepseek-v4.1-flash-1017
 check('case is ignored', priceOf('loomy', 'DeepSeek-V4.1-Flash') === PRICING['deepseek/deepseek-v4.1-flash']);
 check('glm drop-down resolves', priceOf('zcode', 'GLM-5.3-Flash') === PRICING['zhipu/glm-5-3-flash']);
 check('local runtime is free', priceOf('ollama', 'qwen3:8b') === PRICING['local/*']);
+
+// Jet Hub / Qoder gateway codes. These are opaque (`dfmodel`, `qmodel_38max`)
+// and carry no hint of the model behind them, so each one is pinned here:
+// they were read off the gateway's own model list.
+check('dfmodel is DeepSeek Flash', priceOf('qodercn', 'dfmodel') === PRICING['deepseek/deepseek-v4.1-flash']);
+check('dmodel is DeepSeek V4 Pro', priceOf('qodercn', 'dmodel') === PRICING['deepseek/deepseek-v4-pro']);
+check('qmodel_38max is Qwen3.8-Max', priceOf('qodercn', 'qmodel_38max') === PRICING['alibaba/qwen3.8-max']);
+check('gmodel is GLM-5.3', priceOf('qodercn', 'gmodel') === PRICING['zhipu/glm-5.3']);
+check('gfmodel is GLM-5.3-Flash', priceOf('qodercn', 'gfmodel') === PRICING['zhipu/glm-5-3-flash']);
+// Codes the gateway lists but with no public rate behind them stay unpriced.
+check('an unpriced gateway model stays unknown', priceOf('qodercn', 'lmodel') === undefined);
 //#endregion
 
 //#region unknown stays unknown
 // A guessed price is worse than an honest "I do not know": it would put a
 // confident wrong number on a bill.
-check('an unmapped gateway code stays unpriced', priceOf('qodercn', 'dfmodel') === undefined);
+check('an unmapped gateway code stays unpriced', priceOf('qoder', 'fast') === undefined);
 check('an unknown model stays unpriced', priceOf('unknown', 'unknown') === undefined);
 //#endregion
 
