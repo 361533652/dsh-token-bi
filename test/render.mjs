@@ -692,83 +692,9 @@ if (island.length !== 0) throw new Error('卡片不该再有浮岛外壳，它�
 const layoutReads = requests.filter((url) => url.includes('/layout'));
 console.log('layout reads at mount:', layoutReads.length);
 if (layoutReads.length !== 1) throw new Error(`打开时应读一次 layout，实际 ${layoutReads.length} 次`);
-// 拖动必须让磁贴真的跟手：按下后触发一次 mousemove，磁贴要有 translate，
-// 而不是只加了个 data-dragging 标记在原地缩一下。
-const firstTile = tiles[0];
-firstTile.props.onMouseDown({
-  clientX: 100,
-  clientY: 100,
-  target: { closest: () => null },
-  preventDefault() {},
-});
-const draggingFrame = await rerender();
-const lifted = draggingFrame.find((node) => node.props?.className === 'tbi-figureTile' && node.props['data-dragging'] === true);
-console.log('tile lifted on mousedown:', lifted !== undefined);
-if (lifted === undefined) throw new Error('按下后没有磁贴进入拖动态');
-const liftedTransform = String(lifted.props.style?.transform ?? '');
-console.log('lifted transform:', JSON.stringify(liftedTransform));
-if (!liftedTransform.includes('translate')) {
-  throw new Error('拖动中的磁贴没有位移，只是原地缩放（这就是「不会动」）');
-}
-
-// 移动指针后，位移必须真的变化——这是「跟手」的定义。
-const moveListeners = mouseListeners.get('mousemove') ?? [];
-if (moveListeners.length === 0) throw new Error('拖动没有监听 mousemove，磁贴不可能跟手');
-for (const listener of moveListeners) listener({ clientX: 260, clientY: 180 });
-const movedFrame = await rerender();
-const moved = movedFrame.find((node) => node.props?.className === 'tbi-figureTile' && node.props['data-dragging'] === true);
-const movedTransform = String(moved?.props.style?.transform ?? '');
-console.log('transform after moving the pointer:', JSON.stringify(movedTransform));
-if (movedTransform === liftedTransform) {
-  throw new Error('指针移动后磁贴没有跟着动');
-}
-
-// 拼图式换位：每越过一个相邻格就立刻交换，位置当场落定——不是拖动时预览、
-// 松手才一次性交换。这里检查源码里的实现契约。
-const sourceText = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
-const MOVE_ANCHOR = 'const onMove = (event) => {';
-const UP_ANCHOR = 'const onUp = () =>';
-const SWAP_ANCHOR = 'const swapAdjacent = (fromIndex, toIndex) => {';
-
-const moveBody = sourceText.slice(sourceText.indexOf(MOVE_ANCHOR), sourceText.indexOf(UP_ANCHOR));
-if (moveBody.length === 0) throw new Error('找不到拖动移动逻辑');
-// 交换必须发生在 mousemove 里，而不是等到松手。
-if (!moveBody.includes('swapAdjacent(')) {
-  throw new Error('交换没有发生在移动过程中，还是松手才落定');
-}
-const upBody = sourceText.slice(sourceText.indexOf(UP_ANCHOR), sourceText.indexOf(MOVE_ANCHOR) > 0 ? sourceText.indexOf('window.addEventListener', sourceText.indexOf(UP_ANCHOR)) : undefined);
-if (upBody.includes('swapAdjacent(') || upBody.includes('setOrder(')) {
-  throw new Error('松手时仍在改变顺序，位置应在移动中已经落定');
-}
-// 一次只能换相邻的一个格子。
-const swapStart = sourceText.indexOf(SWAP_ANCHOR);
-const swapBody = sourceText.slice(swapStart, sourceText.indexOf('};', swapStart) + 2);
-if (!swapBody.includes('toIndex > fromIndex ? 1 : -1')) {
-  throw new Error('换位不是按相邻一步走的');
-}
-console.log('puzzle swap:', 'adjacent, settled during the move');
-
-// 防闪：交换后槽位测量必须刷新，且一次位置只允许换一次。否则每帧都拿旧矩形
-// 和指针比较，会来回交换——表现就是「乱闪」。
-const swapSource = sourceText.slice(
-  sourceText.indexOf('const swapAdjacent'),
-  sourceText.indexOf('window.addEventListener', sourceText.indexOf('const swapAdjacent')),
-);
-if (!swapSource.includes('measure()')) {
-  throw new Error('交换后没有重新测量槽位，下一帧会拿旧矩形交换回去（乱闪）');
-}
-if (!swapSource.includes('swapBusy')) {
-  throw new Error('没有同步锁，一次移动会被连续触发多次交换');
-}
-// 拖动处理器不得直接读闭包里的 order（会是拖动开始时的旧值）。
-const handlerSource = sourceText.slice(
-  sourceText.indexOf('const onMove = (event) => {'),
-  sourceText.indexOf('const onUp = () =>'),
-);
-if (!handlerSource.includes('orderRef.current')) {
-  throw new Error('拖动处理器读了闭包里的 order，交换一次后它就不再更新');
-}
-console.log('anti-flicker:', 'remeasure + lock + live order');
+// The drag itself is covered by test/drag.mjs, which drives a real browser:
+// this harness has no layout, so anything it could say about a pointer gesture
+// would be a statement about source code rather than about behaviour.
 
 
 
