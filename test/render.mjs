@@ -748,6 +748,28 @@ if (!swapBody.includes('toIndex > fromIndex ? 1 : -1')) {
 }
 console.log('puzzle swap:', 'adjacent, settled during the move');
 
+// 防闪：交换后槽位测量必须刷新，且一次位置只允许换一次。否则每帧都拿旧矩形
+// 和指针比较，会来回交换——表现就是「乱闪」。
+const swapSource = sourceText.slice(
+  sourceText.indexOf('const swapAdjacent'),
+  sourceText.indexOf('window.addEventListener', sourceText.indexOf('const swapAdjacent')),
+);
+if (!swapSource.includes('measure()')) {
+  throw new Error('交换后没有重新测量槽位，下一帧会拿旧矩形交换回去（乱闪）');
+}
+if (!swapSource.includes('swapBusy')) {
+  throw new Error('没有同步锁，一次移动会被连续触发多次交换');
+}
+// 拖动处理器不得直接读闭包里的 order（会是拖动开始时的旧值）。
+const handlerSource = sourceText.slice(
+  sourceText.indexOf('const onMove = (event) => {'),
+  sourceText.indexOf('const onUp = () =>'),
+);
+if (!handlerSource.includes('orderRef.current')) {
+  throw new Error('拖动处理器读了闭包里的 order，交换一次后它就不再更新');
+}
+console.log('anti-flicker:', 'remeasure + lock + live order');
+
 
 
 // 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
