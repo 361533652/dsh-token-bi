@@ -15,16 +15,25 @@ import { readFileSync } from 'node:fs';
  * Hooks are addressed per component: each function component gets its own slot
  * frame, pushed in traversal order, so nested components never share state.
  */
-let frames = [];
+// Slots keyed by component identity, not render order.
+const typeCounters = new Map();
+let frames = new Map();
 let frameIndex = 0;
+ typeCounters.clear();
 let current = null;
 let dirty = false;
 let effects = [];
 
-function beginComponent() {
+function beginComponent(type) {
   const index = frameIndex;
   frameIndex += 1;
-  current = frames[index] ?? (frames[index] = { slots: [], cursor: 0 });
+  const name = typeof type === 'function' ? (type.name || 'anon') : String(type);
+  const ordinal = typeCounters.get(name) ?? 0;
+  typeCounters.set(name, ordinal + 1);
+  const key = `${name}#${ordinal}`;
+  const frame = frames.get(key) ?? { slots: [], cursor: 0 };
+  frames.set(key, frame);
+  current = frame;
   current.cursor = 0;
   return current;
 }
@@ -298,7 +307,7 @@ function renderNode(node) {
   if (Array.isArray(node)) return node.flatMap(renderNode);
   if (node.type === React.Fragment) return renderNode(node.props.children);
   if (typeof node.type === 'function') {
-    beginComponent();
+    beginComponent(node.type);
     return renderNode(node.type({ ...node.props }));
   }
   return [{ tag: node.type, props: node.props ?? {}, children: renderNode(node.props?.children) }];
@@ -310,6 +319,7 @@ for (let pass = 0; pass < 10; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   await new Promise((resolve) => setTimeout(resolve, 30));
@@ -393,6 +403,7 @@ if (rows.length > 0) {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -433,6 +444,7 @@ const rerender = async (wait = 40) => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     await new Promise((resolve) => setTimeout(resolve, wait));
@@ -612,6 +624,7 @@ for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   const tipNodes = collectAll(tree).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
@@ -1022,6 +1035,7 @@ for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   liveNodes = walkCurrent();
@@ -1042,16 +1056,22 @@ if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
 // Both lists sit at ten rows and unroll under the pointer. The height animates
 // to a measured value, so a longer list unrolls further and the cards below are
 // pushed down smoothly rather than jumped.
+// Each list folds at its own depth — ten for models, fifteen for workspaces —
+// so the expectation has to come from the card's own name rather than one
+// number applied to both.
+const FOLD_AT = { models: 10, workspaces: 15 };
 for (const card of rollCards) {
+  const foldedAt = FOLD_AT[card.props['data-list']];
+  if (foldedAt === undefined) throw new Error(`unknown rolling list: ${card.props['data-list']}`);
   const folds = card.props['data-folds'];
   const open = card.props['data-open'];
   const rowsIn = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow').length;
-  console.log('rolling card:', JSON.stringify({ rows: rowsIn, folds, open }));
-  if (rowsIn > 10 && folds !== true) {
-    throw new Error(`a ${rowsIn}-row list does not roll up`);
+  console.log('rolling card:', JSON.stringify({ list: card.props['data-list'], rows: rowsIn, foldedAt, folds, open }));
+  if (rowsIn > foldedAt && folds !== true) {
+    throw new Error(`a ${rowsIn}-row list folds at ${foldedAt} but does not roll up`);
   }
-  if (rowsIn <= 10 && folds === true) {
-    throw new Error(`a ${rowsIn}-row list rolls up with nothing to hide`);
+  if (rowsIn <= foldedAt && folds === true) {
+    throw new Error(`a ${rowsIn}-row list folds at ${foldedAt} yet rolls up with nothing to hide`);
   }
   if (folds === true && open === true) {
     throw new Error('a rolling list started open');
@@ -1173,6 +1193,7 @@ const tipOf = async (node) => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     const hovered = walkCurrent();
@@ -1248,6 +1269,7 @@ dirty = true;
 const enterFrame = await collectAll(
   (() => {
     frameIndex = 0;
+ typeCounters.clear();
     effects = [];
     const next = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
@@ -1274,6 +1296,7 @@ const restFrame = (() => {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   const next = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   return next;
@@ -1297,6 +1320,7 @@ const openCard = () => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     const next = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     return next;
@@ -1450,8 +1474,9 @@ const walkOnce = (list) => {
   return out;
 };
 
-frames = [];
+frames = new Map();
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 const firstFrame = renderNode(React.createElement(page.component, { t }));
@@ -1499,21 +1524,24 @@ if (!transitions.some((transition) => transition.includes("=== 'loading'"))) {
 // ...and once the rebuild lands, the footer goes back to claiming the numbers
 // are current. Otherwise every open would look permanently half-loaded.
 savedKeys = null;
-frames = [];
+frames = new Map();
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 let settledTree = renderNode(React.createElement(page.component, { t }));
 for (const effect of effects) effect();
 await new Promise((resolve) => setTimeout(resolve, 60));
-frames = []; // drop again: the remount must start from the snapshot, not the response
+frames = new Map(); // drop again: the remount must start from the snapshot, not the response
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   settledTree = renderNode(React.createElement(page.component, { t }));
   // Only the follow-up effects, not a fresh mount: replay what the mount
   // registered, exactly as a real open would.
