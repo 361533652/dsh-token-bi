@@ -84,12 +84,16 @@ const React = {
     }
     return frame.slots[index].value;
   },
-  useEffect(fn) {
+  useEffect(fn, deps) {
     const frame = current;
     const index = frame.cursor;
     frame.cursor += 1;
-    if (!(index in frame.slots)) {
-      frame.slots[index] = true;
+    const slot = frame.slots[index];
+    // Honour the dependency array: an effect whose deps changed has to run again.
+    // Ignoring deps meant an effect that starts a drag never re-ran when the drag
+    // began, so its listeners were never registered.
+    if (slot === undefined || !sameDeps(slot.deps, deps)) {
+      frame.slots[index] = { deps };
       effects.push(fn);
     }
   },
@@ -124,6 +128,8 @@ const dwellTimers = [];
 globalThis.__tbiDwellMs = 200;
 const requests = [];
 const listeners = [];
+/** Window mouse handlers registered during a drag, so a test can drive them. */
+const mouseListeners = new Map();
 /** Stand-in for the browser's localStorage, so the paint cache is exercised. */
 const storage = new Map();
 const localStorage = {
@@ -150,10 +156,19 @@ const window = {
   clearTimeout: (handle) => clearTimeout(handle),
   // The panel subscribes to focus so a background window catches up as soon as
   // it is brought forward; the stub only has to accept and remember it.
-  addEventListener: (type) => {
+  addEventListener: (type, fn) => {
     listeners.push(`window:${type}`);
+    if (typeof fn !== 'function') return;
+    const list = mouseListeners.get(type) ?? [];
+    list.push(fn);
+    mouseListeners.set(type, list);
   },
-  removeEventListener: () => {},
+  removeEventListener: (type, fn) => {
+    const list = mouseListeners.get(type);
+    if (list === undefined) return;
+    const at = list.indexOf(fn);
+    if (at >= 0) list.splice(at, 1);
+  },
 };
 /**
  * Session rows the page went looking for by id. `locateSession` is the only
@@ -677,6 +692,37 @@ if (island.length !== 0) throw new Error('卡片不该再有浮岛外壳，它�
 const layoutReads = requests.filter((url) => url.includes('/layout'));
 console.log('layout reads at mount:', layoutReads.length);
 if (layoutReads.length !== 1) throw new Error(`打开时应读一次 layout，实际 ${layoutReads.length} 次`);
+// 拖动必须让磁贴真的跟手：按下后触发一次 mousemove，磁贴要有 translate，
+// 而不是只加了个 data-dragging 标记在原地缩一下。
+const firstTile = tiles[0];
+firstTile.props.onMouseDown({
+  clientX: 100,
+  clientY: 100,
+  target: { closest: () => null },
+  preventDefault() {},
+});
+const draggingFrame = await rerender();
+const lifted = draggingFrame.find((node) => node.props?.className === 'tbi-figureTile' && node.props['data-dragging'] === true);
+console.log('tile lifted on mousedown:', lifted !== undefined);
+if (lifted === undefined) throw new Error('按下后没有磁贴进入拖动态');
+const liftedTransform = String(lifted.props.style?.transform ?? '');
+console.log('lifted transform:', JSON.stringify(liftedTransform));
+if (!liftedTransform.includes('translate')) {
+  throw new Error('拖动中的磁贴没有位移，只是原地缩放（这就是「不会动」）');
+}
+
+// 移动指针后，位移必须真的变化——这是「跟手」的定义。
+const moveListeners = mouseListeners.get('mousemove') ?? [];
+if (moveListeners.length === 0) throw new Error('拖动没有监听 mousemove，磁贴不可能跟手');
+for (const listener of moveListeners) listener({ clientX: 260, clientY: 180 });
+const movedFrame = await rerender();
+const moved = movedFrame.find((node) => node.props?.className === 'tbi-figureTile' && node.props['data-dragging'] === true);
+const movedTransform = String(moved?.props.style?.transform ?? '');
+console.log('transform after moving the pointer:', JSON.stringify(movedTransform));
+if (movedTransform === liftedTransform) {
+  throw new Error('指针移动后磁贴没有跟着动');
+}
+
 // 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
 // 这里直接驱动组件暴露的回调——真实指针拖拽在 jsdom 里没有布局，测不了。
 const beforeIds = nodes
