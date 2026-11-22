@@ -657,6 +657,20 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 顶部八张卡片
+// 四列布局配八张卡片，刚好两行。少了会空出一格（七张时第二行只有一张，
+// 右边一大片空白），多了会折出第三行。数量是布局契约的一部分。
+const figureCards = nodes.filter((node) => node.props?.className === 'tbi-figure');
+console.log('headline figures:', figureCards.length);
+if (figureCards.length !== 8) {
+  throw new Error(`顶部应为 8 张卡片（4×2），实际 ${figureCards.length} 张`);
+}
+// 每张都要有标签和数值，避免加了空壳凑数。
+for (const card of figureCards) {
+  if (collectAll(card.children ?? []).length === 0) throw new Error('一张卡片是空的');
+}
+//#endregion
+
 //#region 图例在图下，不在标题行
 // 卡片头一度同时放视图切换和最多 64 个色块，挤在标题右边折成一大块，把图表
 // 往下顶。图例解释的是这张图，就该在图的下面。
