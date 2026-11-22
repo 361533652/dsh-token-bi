@@ -743,6 +743,37 @@ if (!/next\[from\] = toId;\s*\n\s*next\[to\] = fromId;/.test(swapBody)) {
 }
 console.log('swap semantics:', 'pairwise');
 
+// 被交换的那张也必须动：只把拖动的卡片飞过去、对面纹丝不动，等于没有「换」。
+// 这里检查源码里的让位条件不能自相矛盾——曾经写成外层要求 index !== hoverSlot、
+// 内层又要求 index === hoverSlot，shiftTo 恒为 null，对面永远不动。
+const shiftBlock = sourceText.slice(
+  sourceText.indexOf('let shiftTo = null;'),
+  sourceText.indexOf('const style = {};'),
+);
+if (shiftBlock.length === 0) throw new Error('找不到让位逻辑');
+// 同一个条件里不能既排除又要求同一个下标。
+// Collect every comparison against `index` in the block, wherever it appears,
+// and decide whether the block can ever fire. Comparing the same variable both
+// ways means the body is unreachable — which is exactly the bug this guards.
+const guards = [...shiftBlock.matchAll(/hoverSlot\s*([!=]==)\s*index/g)].map((m) => m[1]);
+const requiresEqual = guards.includes('===');
+const requiresNotEqual = guards.includes('!==');
+if (requiresEqual && requiresNotEqual) {
+  throw new Error('让位条件自相矛盾（同一处既要求 hoverSlot === index 又要求 !== index），被交换的卡片不会移动');
+}
+if (!requiresEqual && !requiresNotEqual) {
+  throw new Error('让位逻辑没有判断悬停的是哪一张，被交换的卡片不会移动');
+}
+if (!shiftBlock.includes('shiftTo = fromIndex')) {
+  throw new Error('被交换的卡片没有让位位移');
+}
+// 位移必须真的算出来，不能只有标记。
+if (!shiftBlock.includes('translate(') && !sourceText.includes('target.left - slot.left')) {
+  throw new Error('让位没有产生位移');
+}
+console.log('swap partner motion:', 'present');
+
+
 
 // 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
 // 这里直接驱动组件暴露的回调——真实指针拖拽在 jsdom 里没有布局，测不了。
