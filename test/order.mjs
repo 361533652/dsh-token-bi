@@ -47,52 +47,68 @@ const check = (label, ok, detail) => {
 };
 
 //#region stepOrder
-// The owner's rule, verbatim: with A B C D, dragging A onto C gives B C A D —
-// A takes C's slot, and B and C each slide back into the hole behind it.
-const base = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+// The owner's rule, on a four-column board:
+//     A B C D
+//     E F G H
+// Dragging A onto C pushes B aside (they are in the same row, B is in between).
+// Dragging A onto E is a single trade, because E is the tile directly below —
+// "adjacent" means adjacent on the board, not adjacent in a flattened list.
+const board = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+const COLS = 4;
 
-check('A dragged onto C pushes the row',
-  JSON.stringify(stepOrder(base, 'A', 2)) === JSON.stringify(['B', 'C', 'A', 'D', 'E', 'F', 'G', 'H']),
-  JSON.stringify(stepOrder(base, 'A', 2)));
-check('one step right is a plain swap',
-  JSON.stringify(stepOrder(base, 'A', 1)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
-check('one step left is a plain swap',
-  JSON.stringify(stepOrder(base, 'B', 0)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
-// Dragging backwards pushes the other way: H onto E gives E F G H at the end.
-check('dragging backwards pulls the row forward',
-  JSON.stringify(stepOrder(base, 'H', 4)) === JSON.stringify(['A', 'B', 'C', 'D', 'H', 'E', 'F', 'G']),
-  JSON.stringify(stepOrder(base, 'H', 4)));
-// A vertical move in a four-column grid: slot 0 to slot 4 is one row down.
-check('a move into the next row lands in that slot',
-  JSON.stringify(stepOrder(base, 'A', 4)) === JSON.stringify(['B', 'C', 'D', 'E', 'A', 'F', 'G', 'H']),
-  JSON.stringify(stepOrder(base, 'A', 4)));
-// Continuing the same drag: after landing in slot 4, moving on to slot 5 pushes
-// the card that was there. Successive steps compose, which is what makes a long
-// drag a series of pushes rather than one jump.
-const afterFirst = stepOrder(base, 'A', 4);
-check('a second push in the same drag composes',
-  JSON.stringify(stepOrder(afterFirst, 'A', 5)) === JSON.stringify(['B', 'C', 'D', 'E', 'F', 'A', 'G', 'H']),
-  JSON.stringify(stepOrder(afterFirst, 'A', 5)));
-// Nothing outside the travelled range may move.
-const jumped = stepOrder(base, 'A', 3);
-check('cards beyond the range stay put',
-  jumped[0] === 'B' && jumped[1] === 'C' && jumped[2] === 'D' && jumped[3] === 'A'
-  && jumped[4] === 'E' && jumped[7] === 'H', JSON.stringify(jumped));
+check('A onto C pushes the one tile between them',
+  JSON.stringify(stepOrder(board, 'A', 2, COLS)) === JSON.stringify(['B', 'C', 'A', 'D', 'E', 'F', 'G', 'H']),
+  JSON.stringify(stepOrder(board, 'A', 2, COLS)));
+
+check('A onto E is a single trade with the tile below',
+  JSON.stringify(stepOrder(board, 'A', 4, COLS)) === JSON.stringify(['E', 'B', 'C', 'D', 'A', 'F', 'G', 'H']),
+  JSON.stringify(stepOrder(board, 'A', 4, COLS)));
+
+// One horizontal step is still a plain trade.
+check('one step right trades neighbours',
+  JSON.stringify(stepOrder(board, 'A', 1, COLS)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
+check('one step left trades neighbours',
+  JSON.stringify(stepOrder(board, 'B', 0, COLS)) === JSON.stringify(['B', 'A', 'C', 'D', 'E', 'F', 'G', 'H']));
+
+// E up onto A: the same trade seen from the other end.
+check('E onto A is also a single trade',
+  JSON.stringify(stepOrder(board, 'E', 0, COLS)) === JSON.stringify(['E', 'B', 'C', 'D', 'A', 'F', 'G', 'H']),
+  JSON.stringify(stepOrder(board, 'E', 0, COLS)));
+
+// A diagonal drag walks like a staircase: A onto F is down then across, or across
+// then down, but each hop is a single grid neighbour.
+const diagonal = stepOrder(board, 'A', 5, COLS);
+check('a diagonal move lands the card in the target slot',
+  diagonal[5] === 'A' && diagonal.length === 8, JSON.stringify(diagonal));
+
+// On a taller board, A onto I is two rows straight down: it passes through E.
+const tall = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+const twoRows = stepOrder(tall, 'A', 8, COLS);
+check('A onto I steps down through E',
+  JSON.stringify(twoRows) === JSON.stringify(['E', 'B', 'C', 'D', 'I', 'F', 'G', 'H', 'A', 'J', 'K', 'L']),
+  JSON.stringify(twoRows));
+
+// The column count comes from the layout, so a two-column board behaves too.
+const twoCol = ['A', 'B', 'C', 'D'];
+check('on a two-column board the tile below is one step away',
+  JSON.stringify(stepOrder(twoCol, 'A', 2, 2)) === JSON.stringify(['C', 'B', 'A', 'D']),
+  JSON.stringify(stepOrder(twoCol, 'A', 2, 2)));
 
 // Out-of-range and unknown input must be inert, not throw.
 check('a target beyond the end is ignored',
-  JSON.stringify(stepOrder(base, 'A', 99)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(board, 'A', 99, COLS)) === JSON.stringify(board));
 check('a negative target is ignored',
-  JSON.stringify(stepOrder(base, 'A', -1)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(board, 'A', -1, COLS)) === JSON.stringify(board));
 check('an unknown id is ignored',
-  JSON.stringify(stepOrder(base, 'ZZ', 2)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(board, 'ZZ', 2, COLS)) === JSON.stringify(board));
 check('moving to where it already is changes nothing',
-  JSON.stringify(stepOrder(base, 'C', 2)) === JSON.stringify(base));
+  JSON.stringify(stepOrder(board, 'C', 2, COLS)) === JSON.stringify(board));
 // The input array must not be mutated: the caller holds the previous order.
 const frozen = ['A', 'B', 'C'];
-stepOrder(frozen, 'A', 2);
+stepOrder(frozen, 'A', 2, 3);
 check('the input order is not mutated', JSON.stringify(frozen) === JSON.stringify(['A', 'B', 'C']));
 //#endregion
+
 
 //#region mergeOrder
 const ids = ['one', 'two', 'three', 'four'];

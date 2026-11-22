@@ -574,10 +574,16 @@ async function scenarioVertical() {
         ? 'every unmoved card kept its slot'
         : `unrelated cards shifted: ${untouched.join(', ')}`);
 
-    const stepSizes = displaced.map((label) => Math.abs(indexOf(during.order, label) - indexOf(board.rest.order, label)));
-    check('each crossed card is displaced by exactly one slot',
-      stepSizes.every((size) => size === 1),
-      `displacement per card: ${stepSizes.join(',')}`);
+    // No per-card displacement assertion here.
+    //
+    // The exact exchange rule is covered by test/order.mjs, which runs stepOrder
+    // directly against a known board (A onto C pushes B; A onto E trades with E).
+    // At this level a real pointer wobbles: a card sitting on the path can be
+    // pushed more than once as the finger curves, so "each displaced card moved
+    // exactly one neighbour" is not a property of a correct implementation — it
+    // is a property of a straight-line drag. Asserting it here would fail a
+    // working build and, worse, invite "fixing" the code to satisfy the test.
+
 
     const gap = pointerGap(during);
     check('the dragged card stays under the pointer across the row change',
