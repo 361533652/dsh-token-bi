@@ -132,4 +132,5 @@ reopened.close();
 //#endregion
 
 rmSync(root, { recursive: true, force: true });
+
 console.log('ledger contract ok');

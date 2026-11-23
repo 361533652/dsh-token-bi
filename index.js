@@ -16,6 +16,8 @@
  */
 import { UsageCollector } from './lib/collector.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { markSeeded, needsSeed, openLedger } from './lib/ledger.mjs';
 import { rebuildLedger, syncLedger } from './lib/sync.mjs';
 
@@ -461,6 +463,69 @@ export function apply(ctx) {
     if (typeof timer?.unref === 'function') timer.unref();
   };
 
+  /**
+   * The card order the reader dragged into place.
+   *
+   * A list of stable card ids rather than pixel coordinates: the cards live in a
+   * grid, so their position is a consequence of the order they come in. Storing
+   * the order means a rearranged board still reads correctly at any width.
+   */
+  const layoutPath = (root) => join(root, '.token-bi-cache', 'layout.json');
+
+  const readLayout = () => {
+    const root = resolveStoreRoot(ctx);
+    if (root === undefined) return undefined;
+    try {
+      const raw = JSON.parse(readFileSync(layoutPath(root), 'utf8'));
+      return typeof raw === 'object' && raw !== null ? raw : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const writeLayout = (value) => {
+    const root = resolveStoreRoot(ctx);
+    if (root === undefined) return false;
+    if (typeof value !== 'object' || value === null) return false;
+    const dir = join(root, '.token-bi-cache');
+    mkdirSync(dir, { recursive: true });
+    // Only the field this plugin owns, and only well-formed ids: a client cannot
+    // write arbitrary keys into the config file.
+    const next = {};
+    if (Array.isArray(value.order)) {
+      next.order = value.order
+        .filter((id) => typeof id === 'string' && /^[a-z0-9-]{1,40}$/i.test(id))
+        .slice(0, 32);
+    }
+    if (next.order === undefined) return false;
+    writeFileSync(layoutPath(root), JSON.stringify(next));
+    return true;
+  };
+
+  /** Read a JSON request body, with a small cap so a bad client cannot flood it. */
+  const readJsonBody = (req) => new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 4096) {
+        reject(new Error('body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (raw.length === 0) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error('body is not JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+
   /** Answer one request for this instance. */
   const serve = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -474,6 +539,19 @@ export function apply(ctx) {
       }
       if (path === `${ROUTE}/days`) {
         sendJson(res, 200, await readDaily(offsetMinutes));
+        return;
+      }
+      if (path === `${ROUTE}/layout`) {
+        if (req.method === 'POST' || req.method === 'PUT') {
+          const body = await readJsonBody(req);
+          if (!writeLayout(body)) {
+            sendJson(res, 400, { error: 'layout must be { order: string[] }' });
+            return;
+          }
+          sendJson(res, 200, { ok: true, layout: readLayout() });
+          return;
+        }
+        sendJson(res, 200, { layout: readLayout() });
         return;
       }
       if (path === `${ROUTE}/session`) {

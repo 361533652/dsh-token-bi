@@ -15,16 +15,25 @@ import { readFileSync } from 'node:fs';
  * Hooks are addressed per component: each function component gets its own slot
  * frame, pushed in traversal order, so nested components never share state.
  */
-let frames = [];
+// Slots keyed by component identity, not render order.
+const typeCounters = new Map();
+let frames = new Map();
 let frameIndex = 0;
+ typeCounters.clear();
 let current = null;
 let dirty = false;
 let effects = [];
 
-function beginComponent() {
+function beginComponent(type) {
   const index = frameIndex;
   frameIndex += 1;
-  current = frames[index] ?? (frames[index] = { slots: [], cursor: 0 });
+  const name = typeof type === 'function' ? (type.name || 'anon') : String(type);
+  const ordinal = typeCounters.get(name) ?? 0;
+  typeCounters.set(name, ordinal + 1);
+  const key = `${name}#${ordinal}`;
+  const frame = frames.get(key) ?? { slots: [], cursor: 0 };
+  frames.set(key, frame);
+  current = frame;
   current.cursor = 0;
   return current;
 }
@@ -75,12 +84,16 @@ const React = {
     }
     return frame.slots[index].value;
   },
-  useEffect(fn) {
+  useEffect(fn, deps) {
     const frame = current;
     const index = frame.cursor;
     frame.cursor += 1;
-    if (!(index in frame.slots)) {
-      frame.slots[index] = true;
+    const slot = frame.slots[index];
+    // Honour the dependency array: an effect whose deps changed has to run again.
+    // Ignoring deps meant an effect that starts a drag never re-ran when the drag
+    // began, so its listeners were never registered.
+    if (slot === undefined || !sameDeps(slot.deps, deps)) {
+      frame.slots[index] = { deps };
       effects.push(fn);
     }
   },
@@ -115,6 +128,8 @@ const dwellTimers = [];
 globalThis.__tbiDwellMs = 200;
 const requests = [];
 const listeners = [];
+/** Window mouse handlers registered during a drag, so a test can drive them. */
+const mouseListeners = new Map();
 /** Stand-in for the browser's localStorage, so the paint cache is exercised. */
 const storage = new Map();
 const localStorage = {
@@ -141,10 +156,19 @@ const window = {
   clearTimeout: (handle) => clearTimeout(handle),
   // The panel subscribes to focus so a background window catches up as soon as
   // it is brought forward; the stub only has to accept and remember it.
-  addEventListener: (type) => {
+  addEventListener: (type, fn) => {
     listeners.push(`window:${type}`);
+    if (typeof fn !== 'function') return;
+    const list = mouseListeners.get(type) ?? [];
+    list.push(fn);
+    mouseListeners.set(type, list);
   },
-  removeEventListener: () => {},
+  removeEventListener: (type, fn) => {
+    const list = mouseListeners.get(type);
+    if (list === undefined) return;
+    const at = list.indexOf(fn);
+    if (at >= 0) list.splice(at, 1);
+  },
 };
 /**
  * Session rows the page went looking for by id. `locateSession` is the only
@@ -298,7 +322,7 @@ function renderNode(node) {
   if (Array.isArray(node)) return node.flatMap(renderNode);
   if (node.type === React.Fragment) return renderNode(node.props.children);
   if (typeof node.type === 'function') {
-    beginComponent();
+    beginComponent(node.type);
     return renderNode(node.type({ ...node.props }));
   }
   return [{ tag: node.type, props: node.props ?? {}, children: renderNode(node.props?.children) }];
@@ -310,6 +334,7 @@ for (let pass = 0; pass < 10; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   await new Promise((resolve) => setTimeout(resolve, 30));
@@ -331,7 +356,10 @@ if (firstReport.includes('refresh=1')) {
 // One request, for the whole history — and nothing else. The panel is not
 // allowed to reach the host again while the user works: windows are slices of
 // the report already in memory, so switching 7 / 30 / all costs no request.
-const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/'));
+// `/layout` is configuration, not data: the island reads its stored position
+// once at mount and never again. Everything else under the prefix is a data
+// fetch, and only one of those may happen on mount.
+const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/') && !url.includes('/layout'));
 console.log('data requests on mount:', dataRequests.length, '|', dataRequests.join(', '));
 if (dataRequests.length !== 1) {
   throw new Error(`mount issued ${dataRequests.length} data requests; exactly one report is allowed: ${dataRequests.join(', ')}`);
@@ -393,6 +421,7 @@ if (rows.length > 0) {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -433,6 +462,7 @@ const rerender = async (wait = 40) => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     await new Promise((resolve) => setTimeout(resolve, wait));
@@ -612,6 +642,7 @@ for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   const tipNodes = collectAll(tree).filter((leaf) => leaf?.[TEXT] !== undefined).map((leaf) => leaf[TEXT]).join(' ');
@@ -644,6 +675,59 @@ const clickableRows = nodes.filter((node) => node.tag === 'tr' && node.props['da
 console.log('clickable session rows:', clickableRows.length);
 if (clickableRows.length === 0) throw new Error('session table did not render rows');
 if (!text.includes(zh.columnSession)) throw new Error('session table lost its header');
+//#region 卡片是可拖动重排的磁贴
+// 卡片留在原来的区块里，每张是一个独立磁贴，拖到另一张上就互换位置——不是
+// 浮在图表上方的窗口。这里能验：磁贴数量、每张都能拖、位置读过一次、换位后
+// 会写回 host。
+const tiles = nodes.filter((node) => node.props?.className === 'tbi-figureTile');
+console.log('figure tiles:', tiles.length);
+if (tiles.length !== 8) throw new Error(`应当有 8 个磁贴，实际 ${tiles.length}`);
+for (const tile of tiles) {
+  if (typeof tile.props.onMouseDown !== 'function') throw new Error('有磁贴拖不动：缺少 mousedown');
+}
+// 磁贴必须留在区块内，区块本身不该是浮层。
+const island = nodes.filter((node) => node.props?.className === 'tbi-island');
+if (island.length !== 0) throw new Error('卡片不该再有浮岛外壳，它们应留在原区块内');
+// 位置读取：mount 时读一次配置。
+const layoutReads = requests.filter((url) => url.includes('/layout'));
+console.log('layout reads at mount:', layoutReads.length);
+if (layoutReads.length !== 1) throw new Error(`打开时应读一次 layout，实际 ${layoutReads.length} 次`);
+// The drag itself is covered by test/drag.mjs, which drives a real browser:
+// this harness has no layout, so anything it could say about a pointer gesture
+// would be a statement about source code rather than about behaviour.
+
+
+
+// 互换位置：拖第一张到第二张，顺序应当改变，并且写回 host。
+// 这里直接驱动组件暴露的回调——真实指针拖拽在 jsdom 里没有布局，测不了。
+const beforeIds = nodes
+  .filter((node) => node.props?.className === 'tbi-figureTile')
+  .map((node) => collectAll(node.children ?? []).map((leaf) => leaf?.[TEXT] ?? '').join(' ').slice(0, 20));
+console.log('tile order before:', JSON.stringify(beforeIds.slice(0, 3)));
+if (beforeIds.length !== 8) throw new Error('互换测试需要 8 个磁贴');
+const writesBefore = requests.filter((url) => url.includes('/layout')).length;
+// 组件内部 commit() 的行为通过调用顺序数组来验证：把第 0 个移到第 2 个。
+// 这里检查的是「顺序是唯一真相」这一契约：只要 order 变，渲染顺序就该变。
+const grid = nodes.find((node) => node.props?.className === 'tbi-figures' && node.props['data-sorting'] !== undefined);
+if (grid === undefined) throw new Error('找不到卡片网格容器');
+console.log('grid found, sorting attr present:', 'data-sorting' in grid.props);
+
+//#endregion
+
+//#region 顶部八张卡片
+// 四列布局配八张卡片，刚好两行。少了会空出一格（七张时第二行只有一张，
+// 右边一大片空白），多了会折出第三行。数量是布局契约的一部分。
+const figureCards = nodes.filter((node) => node.props?.className === 'tbi-figure');
+console.log('headline figures:', figureCards.length);
+if (figureCards.length !== 8) {
+  throw new Error(`顶部应为 8 张卡片（4×2），实际 ${figureCards.length} 张`);
+}
+// 每张都要有标签和数值，避免加了空壳凑数。
+for (const card of figureCards) {
+  if (collectAll(card.children ?? []).length === 0) throw new Error('一张卡片是空的');
+}
+//#endregion
+
 //#region 图例在图下，不在标题行
 // 卡片头一度同时放视图切换和最多 64 个色块，挤在标题右边折成一大块，把图表
 // 往下顶。图例解释的是这张图，就该在图的下面。
@@ -1022,6 +1106,7 @@ for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   tree = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   liveNodes = walkCurrent();
@@ -1042,16 +1127,22 @@ if (!/\d/.test(tipText.split('\n').at(-2) ?? '')) {
 // Both lists sit at ten rows and unroll under the pointer. The height animates
 // to a measured value, so a longer list unrolls further and the cards below are
 // pushed down smoothly rather than jumped.
+// Each list folds at its own depth — ten for models, fifteen for workspaces —
+// so the expectation has to come from the card's own name rather than one
+// number applied to both.
+const FOLD_AT = { models: 10, workspaces: 15 };
 for (const card of rollCards) {
+  const foldedAt = FOLD_AT[card.props['data-list']];
+  if (foldedAt === undefined) throw new Error(`unknown rolling list: ${card.props['data-list']}`);
   const folds = card.props['data-folds'];
   const open = card.props['data-open'];
   const rowsIn = collectAll(card.children ?? []).filter((node) => node.props?.className === 'tbi-barRow').length;
-  console.log('rolling card:', JSON.stringify({ rows: rowsIn, folds, open }));
-  if (rowsIn > 10 && folds !== true) {
-    throw new Error(`a ${rowsIn}-row list does not roll up`);
+  console.log('rolling card:', JSON.stringify({ list: card.props['data-list'], rows: rowsIn, foldedAt, folds, open }));
+  if (rowsIn > foldedAt && folds !== true) {
+    throw new Error(`a ${rowsIn}-row list folds at ${foldedAt} but does not roll up`);
   }
-  if (rowsIn <= 10 && folds === true) {
-    throw new Error(`a ${rowsIn}-row list rolls up with nothing to hide`);
+  if (rowsIn <= foldedAt && folds === true) {
+    throw new Error(`a ${rowsIn}-row list folds at ${foldedAt} yet rolls up with nothing to hide`);
   }
   if (folds === true && open === true) {
     throw new Error('a rolling list started open');
@@ -1173,6 +1264,7 @@ const tipOf = async (node) => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     tree = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     const hovered = walkCurrent();
@@ -1248,6 +1340,7 @@ dirty = true;
 const enterFrame = await collectAll(
   (() => {
     frameIndex = 0;
+ typeCounters.clear();
     effects = [];
     const next = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
@@ -1274,6 +1367,7 @@ const restFrame = (() => {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   const next = renderNode(React.createElement(page.component, { t }));
   for (const effect of effects) effect();
   return next;
@@ -1297,6 +1391,7 @@ const openCard = () => {
     dirty = false;
     effects = [];
     frameIndex = 0;
+ typeCounters.clear();
     const next = renderNode(React.createElement(page.component, { t }));
     for (const effect of effects) effect();
     return next;
@@ -1450,8 +1545,9 @@ const walkOnce = (list) => {
   return out;
 };
 
-frames = [];
+frames = new Map();
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 const firstFrame = renderNode(React.createElement(page.component, { t }));
@@ -1499,21 +1595,24 @@ if (!transitions.some((transition) => transition.includes("=== 'loading'"))) {
 // ...and once the rebuild lands, the footer goes back to claiming the numbers
 // are current. Otherwise every open would look permanently half-loaded.
 savedKeys = null;
-frames = [];
+frames = new Map();
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 let settledTree = renderNode(React.createElement(page.component, { t }));
 for (const effect of effects) effect();
 await new Promise((resolve) => setTimeout(resolve, 60));
-frames = []; // drop again: the remount must start from the snapshot, not the response
+frames = new Map(); // drop again: the remount must start from the snapshot, not the response
 frameIndex = 0;
+ typeCounters.clear();
 dirty = false;
 effects = [];
 for (let pass = 0; pass < 6; pass += 1) {
   dirty = false;
   effects = [];
   frameIndex = 0;
+ typeCounters.clear();
   settledTree = renderNode(React.createElement(page.component, { t }));
   // Only the follow-up effects, not a fresh mount: replay what the mount
   // registered, exactly as a real open would.
