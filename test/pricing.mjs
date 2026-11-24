@@ -9,7 +9,8 @@
  *
  *   node test/pricing.mjs
  */
-import { priceOf, costOf, inCny, rateFor, inPeakWindow, CNY_PER_USD, PRICING } from '../lib/pricing.mjs';
+import { priceOf, costOf, inCny, rateFor, inPeakWindow, CNY_PER_USD, PRICING, PRICING_DIGEST } from '../lib/pricing.mjs';
+import { createHash } from 'node:crypto';
 
 let failures = 0;
 const check = (label, ok, detail) => {
@@ -172,4 +173,27 @@ if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);
 }
+//#region price digest
+{
+  const recomputed = createHash('sha1')
+    .update(JSON.stringify(PRICING))
+    .update('7.1')
+    .digest('hex')
+    .slice(0, 16);
+  check('the price digest is derived from the table itself',
+    PRICING_DIGEST === recomputed, `${PRICING_DIGEST} vs ${recomputed}`);
+  check('the digest looks like a digest', /^[0-9a-f]{16}$/.test(PRICING_DIGEST), PRICING_DIGEST);
+
+  // Changing any rate must change the digest; this is what invalidates the cache.
+  const mutated = JSON.parse(JSON.stringify(PRICING));
+  mutated['deepseek/deepseek-v4.1-flash'].offpeak.cacheRead = 0.11;
+  const afterEdit = createHash('sha1')
+    .update(JSON.stringify(mutated))
+    .update('7.1')
+    .digest('hex')
+    .slice(0, 16);
+  check('editing a rate changes the digest', afterEdit !== PRICING_DIGEST);
+}
+//#endregion
+
 console.log('\npricing ok');
