@@ -143,6 +143,31 @@ for (const [key, entry] of Object.entries(PRICING)) {
 console.log(`PASS  all ${Object.keys(PRICING).length} entries carry four buckets and a schedule`);
 //#endregion
 
+//#region cache-hit ratio
+for (const [key, entry] of Object.entries(PRICING)) {
+  if (!key.startsWith('deepseek/')) continue;
+  const schedule = entry.offpeak ?? entry.flat;
+  if (schedule === undefined) continue;
+  const ratio = schedule.input / schedule.cacheRead;
+  console.log(`${ratio >= 20 ? 'PASS' : 'FAIL'}  ${key} cache hit is at least 20x cheaper than cache miss` +
+    `  (input ${schedule.input} / cacheRead ${schedule.cacheRead} = ${ratio.toFixed(1)}x)`);
+  if (!(ratio >= 20)) failures += 1;
+}
+
+// The published off-peak figures, verbatim from the vendor's own price page.
+// Hard-coding two of them catches a mistyped digit that a ratio check would pass.
+{
+  const flash = PRICING['deepseek/deepseek-v4.1-flash'].offpeak;
+  check('V4.1-Flash off-peak cache hit is 0.02 a million', flash.cacheRead === 0.02, String(flash.cacheRead));
+  check('V4.1-Flash off-peak cache miss is 1 a million', flash.input === 1, String(flash.input));
+  check('V4.1-Flash off-peak output is 4 a million', flash.output === 4, String(flash.output));
+  const peak = PRICING['deepseek/deepseek-v4.1-flash'].peak;
+  check('peak is exactly double off-peak',
+    peak.input === flash.input * 2 && peak.cacheRead === flash.cacheRead * 2 && peak.output === flash.output * 2,
+    `${peak.input}/${peak.cacheRead}/${peak.output}`);
+}
+//#endregion
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);
