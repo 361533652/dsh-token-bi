@@ -444,8 +444,7 @@ if (rows.length > 0) {
 // A session that spawned subagents used to add a row per child to both lists,
 // with no way to put them away. They are now folded under their parent and
 // unfolded on demand — without dropping anything the page already promised:
-// the headline totals, the row's own numbers and the call tree's own/children
-// split all have to survive a fold.
+// the headline totals and the row's own numbers both have to survive a fold.
 const collectAll = (list) => {
   const out = [];
   const walk = (nodes) => {
@@ -593,32 +592,6 @@ if (headlineAfter !== headlineBefore) {
   throw new Error(`folding changed the headline numbers: ${headlineBefore} -> ${headlineAfter}`);
 }
 
-// The call tree tracks the same branch state, and its fold pill must fold
-// without navigating away (the row itself is the "locate" target).
-const treePill = foldNodes.find((node) => node.props?.className === 'tbi-foldBtn' && node.props?.['data-sub'] === true);
-if (treePill === undefined) throw new Error('the call tree has no fold control for a parent with children');
-const parentTreeRow = foldNodes.find((node) => node.props?.className === 'tbi-treeRow' && node.props?.title === zh.locateSession && collectAll(node.children ?? []).some((leaf) => leaf?.[TEXT] === 'Fold parent session'));
-if (parentTreeRow === undefined) throw new Error('the call tree did not draw the parent session');
-const pillInsideParent = collectAll(parentTreeRow.children ?? []).find((node) => node.props?.className === 'tbi-foldBtn');
-if (pillInsideParent === undefined) throw new Error('the tree row for the parent has no fold pill');
-const lookupsBefore = domLookups.length;
-const treeFoldEvent = clickBubblingTo(pillInsideParent, parentTreeRow);
-if (!treeFoldEvent.stopped) {
-  throw new Error('the tree fold pill lets the click reach the row, so folding also jumps to the session table');
-}
-if (domLookups.length !== lookupsBefore) {
-  throw new Error(`folding from the call tree navigated to ${domLookups.slice(lookupsBefore).join(', ')}`);
-}
-const afterTreeFold = await rerender();
-if (afterTreeFold.some((node) => node.props?.className === 'tbi-treeRow' && collectAll(node.children ?? []).some((leaf) => leaf?.[TEXT] === 'Fold child session'))) {
-  throw new Error('folding from the call tree did not fold the branch');
-}
-// The tree keeps the parent's own/children split visible while folded, so the
-// bar still accounts for the hidden rows.
-const track = collectAll(parentTreeRow.children ?? []).find((node) => node.props?.className === 'tbi-treeTrack');
-if (track === undefined) throw new Error('the folded parent lost its bar');
-if (String(track.props.title).length === 0) throw new Error('the bar no longer explains own vs children');
-console.log('tree fold ok');
 //#endregion
 
 //#region aggregate route note
@@ -817,27 +790,16 @@ for (const [name, wheelEvent, box, want] of wheelCases) {
 }
 //#endregion
 
-//#region the table and the call tree show one selection
-// Both cards are views of the same set: whatever the table draws, the tree
-// draws, in the same order. They used to read different arrays — the table its
-// page, the tree the whole forest — so paging moved one and not the other.
+//#region the session table pages through one selection
+// The call tree used to mirror this table row for row. It was removed as a
+// duplicate view, so only the table's own paging is checked here.
 const tableRowsNow = nodes.filter((node) => node.tag === 'tr' && node.props?.['data-clickable'] === 'true');
-const treeRowsNow = nodes.filter((node) => node.props?.className === 'tbi-treeRow');
 const tableTitles = tableRowsNow.map((node) => {
   const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
   return title === undefined ? '' : String(title.props?.title ?? '');
 });
-const treeTitles = treeRowsNow.map((node) => {
-  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
-  return name === undefined ? '' : String(name.props?.title ?? '');
-});
-console.log('table rows:', tableTitles.length, '| tree rows:', treeTitles.length);
-if (treeTitles.length !== tableTitles.length) {
-  throw new Error(`the table drew ${tableTitles.length} rows and the tree ${treeTitles.length}`);
-}
-if (tableTitles.join('\u0000') !== treeTitles.join('\u0000')) {
-  throw new Error('the tree lists different sessions, or in a different order, than the table');
-}
+console.log('table rows:', tableTitles.length);
+if (tableTitles.length === 0) throw new Error('the session table drew no rows');
 // Turn a page: both lists must follow together, and the second page must hold
 // different sessions than the first. The page size is reset to ten first — an
 // earlier check raised it to a hundred, which would fit the whole fixture on
@@ -853,14 +815,6 @@ const pagedTable = paged.filter((node) => node.tag === 'tr' && node.props?.['dat
   const title = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-sessionTitle');
   return title === undefined ? '' : String(title.props?.title ?? '');
 });
-const pagedTree = paged.filter((node) => node.props?.className === 'tbi-treeRow').map((node) => {
-  const name = collectAll(node.children ?? []).find((leaf) => leaf.props?.className === 'tbi-treeName');
-  return name === undefined ? '' : String(name.props?.title ?? '');
-});
-console.log('page 2 — table rows:', pagedTable.length, '| tree rows:', pagedTree.length);
-if (pagedTable.join('\u0000') !== pagedTree.join('\u0000')) {
-  throw new Error('the tree did not follow the table to the next page');
-}
 if (pagedTable.join('\u0000') === tableTitles.join('\u0000')) {
   throw new Error('paging did not change which sessions are drawn');
 }
