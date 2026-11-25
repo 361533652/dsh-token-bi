@@ -19,7 +19,7 @@ import { loadCommitCache } from './lib/gitcommits.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markSeeded, needsSeed, openLedger } from './lib/ledger.mjs';
 import { rebuildLedger, syncLedger } from './lib/sync.mjs';
@@ -366,11 +366,6 @@ export function apply(ctx) {
         const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays }, storeFingerprint(storeRoot), true);
         if (hit !== undefined) {
           scheduleWarm(startBuild);
-  // Warm the commit cache once, off-process, so the card has data on first open.
-  {
-    const commitRoot = resolveStoreRoot(ctx);
-    if (commitRoot !== undefined) startCommitBuild(commitRoot);
-  }
           return { ...hit.report, fromCache: true, cacheSavedAt: hit.savedAt, stale: hit.stale === true };
         }
       } catch {
@@ -479,9 +474,21 @@ export function apply(ctx) {
     commitBuildAt = Date.now();
     try {
       const cli = join(fileURLToPath(new URL('.', import.meta.url)), 'lib', 'commits-cli.mjs');
+      let stderr = 'ignore';
+      try {
+        mkdirSync(join(storeRoot, '.token-bi-cache'), { recursive: true });
+        stderr = openSync(join(storeRoot, '.token-bi-cache', 'commits.log'), 'a');
+      } catch {
+        // Without a log file the build still runs; only the diagnosis is lost.
+      }
       const child = spawn(process.execPath, [cli, storeRoot], {
+        // The host is the Electron binary. This flag turns it back into a plain
+        // Node runtime for the child; the shell clears it for its own use, so it
+        // has to be set explicitly here. Without it the child starts a second
+        // application and exits in a few hundred milliseconds, silently.
+        env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: '1' }) },
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', stderr],
         windowsHide: true,
       });
       commitBuild = child;
@@ -597,8 +604,13 @@ export function apply(ctx) {
           return;
         }
         const warm = loadCommitCache(storeRoot);
-        if (warm !== null && url.searchParams.get('refresh') !== '1') {
-          sendJson(res, 200, { ...warm, cached: true });
+        const wantsRefresh = url.searchParams.get('refresh') === '1';
+        if (warm !== null) {
+          // Answer with what exists either way; a refresh only starts the rebuild
+          // behind the response. Returning an empty series here used to make an
+          // explicit refresh show *less* than doing nothing.
+          if (wantsRefresh) startCommitBuild(storeRoot);
+          sendJson(res, 200, { ...warm, cached: true, refreshing: wantsRefresh });
           return;
         }
         // Nothing usable on disk yet. Answer immediately and start the scan in a
