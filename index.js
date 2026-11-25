@@ -15,6 +15,7 @@
  * installed for the process and each instance becomes its current handler.
  */
 import { UsageCollector } from './lib/collector.mjs';
+import { readCommitSeries } from './lib/gitcommits.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -539,6 +540,16 @@ export function apply(ctx) {
       }
       if (path === `${ROUTE}/days`) {
         sendJson(res, 200, await readDaily(offsetMinutes));
+        return;
+      }
+      // Commit volume is assembled from the local git repositories and the
+      // session logs, not from the ledger, so it gets its own route rather than
+      // riding along inside the report.
+      if (path === `${ROUTE}/commits`) {
+        const storeRoot = resolveStoreRoot(ctx);
+        sendJson(res, 200, storeRoot === undefined
+          ? { days: [], totals: { aiCommits: 0, humanCommits: 0, aiAdded: 0, humanAdded: 0, aiRemoved: 0, humanRemoved: 0 }, repos: [] }
+          : readCommitSeries(storeRoot));
         return;
       }
       if (path === `${ROUTE}/layout`) {

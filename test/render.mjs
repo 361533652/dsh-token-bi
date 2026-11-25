@@ -361,8 +361,13 @@ if (firstReport.includes('refresh=1')) {
 // fetch, and only one of those may happen on mount.
 const dataRequests = requests.filter((url) => url.includes('/api/dsh-token-bi/') && !url.includes('/layout'));
 console.log('data requests on mount:', dataRequests.length, '|', dataRequests.join(', '));
-if (dataRequests.length !== 1) {
-  throw new Error(`mount issued ${dataRequests.length} data requests; exactly one report is allowed: ${dataRequests.join(', ')}`);
+// Two sources now: the ledger report and the commit series. The rule that still
+// matters is that nothing here reacts to interaction — any third request, or a
+// repeat of either, would mean the panel is re-fetching under the pointer.
+const mountReportCalls = dataRequests.filter((url) => url.includes('/report'));
+const mountCommitCalls = dataRequests.filter((url) => url.includes('/commits'));
+if (mountReportCalls.length !== 1 || mountCommitCalls.length > 1 || dataRequests.length !== mountReportCalls.length + mountCommitCalls.length) {
+  throw new Error(`mount issued ${dataRequests.length} data request(s); expected one report and at most one commit series: ${dataRequests.join(', ')}`);
 }
 if (requests.some((url) => url.includes('/days?'))) {
   throw new Error('the page still asks for the annual days separately; the whole report already carries them');
