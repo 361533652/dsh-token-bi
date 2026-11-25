@@ -15,7 +15,7 @@
  * installed for the process and each instance becomes its current handler.
  */
 import { UsageCollector } from './lib/collector.mjs';
-import { readCommitSeries } from './lib/gitcommits.mjs';
+import { loadCommitCache, readCommitSeries } from './lib/gitcommits.mjs';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -547,9 +547,24 @@ export function apply(ctx) {
       // riding along inside the report.
       if (path === `${ROUTE}/commits`) {
         const storeRoot = resolveStoreRoot(ctx);
-        sendJson(res, 200, storeRoot === undefined
-          ? { days: [], totals: { aiCommits: 0, humanCommits: 0, aiAdded: 0, humanAdded: 0, aiRemoved: 0, humanRemoved: 0 }, repos: [] }
-          : readCommitSeries(storeRoot));
+        if (storeRoot === undefined) {
+          sendJson(res, 200, { days: [], totals: { aiCommits: 0, humanCommits: 0, aiAdded: 0, humanAdded: 0, aiRemoved: 0, humanRemoved: 0 }, repos: [], pending: true });
+          return;
+        }
+        const warm = loadCommitCache(storeRoot);
+        if (warm !== null) {
+          sendJson(res, 200, { ...warm, cached: true });
+          return;
+        }
+        // Nothing on disk yet: answer with an empty series now and build behind
+        // the response, so the panel paints and fills in on the next open.
+        const refresh = url.searchParams.get('refresh') === '1';
+        if (refresh) {
+          sendJson(res, 200, readCommitSeries(storeRoot, { refresh: true }));
+          return;
+        }
+        scheduleWarm(() => readCommitSeries(storeRoot, { refresh: true }));
+        sendJson(res, 200, { days: [], totals: { aiCommits: 0, humanCommits: 0, aiAdded: 0, humanAdded: 0, aiRemoved: 0, humanRemoved: 0 }, repos: [], pending: true });
         return;
       }
       if (path === `${ROUTE}/layout`) {
