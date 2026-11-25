@@ -15,7 +15,9 @@
  * installed for the process and each instance becomes its current handler.
  */
 import { UsageCollector } from './lib/collector.mjs';
-import { loadCommitCache, readCommitSeries } from './lib/gitcommits.mjs';
+import { loadCommitCache } from './lib/gitcommits.mjs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createSessionStore, loadReportCache, resolveStoreRoot, saveReportCache, storeFingerprint } from './lib/cache.mjs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -364,6 +366,11 @@ export function apply(ctx) {
         const hit = loadReportCache(storeRoot, { offsetMinutes, rangeDays }, storeFingerprint(storeRoot), true);
         if (hit !== undefined) {
           scheduleWarm(startBuild);
+  // Warm the commit cache once, off-process, so the card has data on first open.
+  {
+    const commitRoot = resolveStoreRoot(ctx);
+    if (commitRoot !== undefined) startCommitBuild(commitRoot);
+  }
           return { ...hit.report, fromCache: true, cacheSavedAt: hit.savedAt, stale: hit.stale === true };
         }
       } catch {
@@ -450,6 +457,44 @@ export function apply(ctx) {
    * browser still waited behind a 5 MB cache decompress that the rebuild
    * triggered. A short timer lets the paint happen first.
    */
+  /**
+   * Build the commit series out of process.
+   *
+   * The scan decodes a few hundred megabytes of session logs and takes about a
+   * minute. Running it here would block the event loop that serves every other
+   * request — opening a session, painting the panel — so the app would appear to
+   * hang. A detached child does the work and writes the cache; this process only
+   * ever reads that file.
+   *
+   * One build at a time: a second request while one is running is simply told
+   * "pending", not queued.
+   */
+  let commitBuild = null;
+  let commitBuildAt = 0;
+  const startCommitBuild = (storeRoot) => {
+    if (commitBuild !== null) return;
+    // One attempt a minute: a child that dies immediately must not be retried on
+    // every poll of the panel.
+    if (Date.now() - commitBuildAt < 60_000) return;
+    commitBuildAt = Date.now();
+    try {
+      const cli = join(fileURLToPath(new URL('.', import.meta.url)), 'lib', 'commits-cli.mjs');
+      const child = spawn(process.execPath, [cli, storeRoot], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      commitBuild = child;
+      const done = () => { commitBuild = null; };
+      child.on('exit', done);
+      child.on('error', done);
+      if (typeof child.unref === 'function') child.unref();
+    } catch {
+      // No child process available: the card simply stays empty.
+      commitBuild = null;
+    }
+  };
+
   const scheduleWarm = (build) => {
     if (warming !== undefined || building !== undefined) return;
     const timer = setTimeout(() => {
@@ -552,18 +597,13 @@ export function apply(ctx) {
           return;
         }
         const warm = loadCommitCache(storeRoot);
-        if (warm !== null) {
+        if (warm !== null && url.searchParams.get('refresh') !== '1') {
           sendJson(res, 200, { ...warm, cached: true });
           return;
         }
-        // Nothing on disk yet: answer with an empty series now and build behind
-        // the response, so the panel paints and fills in on the next open.
-        const refresh = url.searchParams.get('refresh') === '1';
-        if (refresh) {
-          sendJson(res, 200, readCommitSeries(storeRoot, { refresh: true }));
-          return;
-        }
-        scheduleWarm(() => readCommitSeries(storeRoot, { refresh: true }));
+        // Nothing usable on disk yet. Answer immediately and start the scan in a
+        // child process: this handler must never do the decoding itself.
+        startCommitBuild(storeRoot);
         sendJson(res, 200, { days: [], totals: { aiCommits: 0, humanCommits: 0, aiAdded: 0, humanAdded: 0, aiRemoved: 0, humanRemoved: 0 }, repos: [], pending: true });
         return;
       }
